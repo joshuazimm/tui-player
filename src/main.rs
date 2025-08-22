@@ -133,10 +133,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("No output device available");
 
     let mut supported_configs_range = device.supported_output_configs()?;
-    let config = supported_configs_range
-        .next()
-        .expect("No supported config")
-        .with_max_sample_rate();
+    let supported_configs: Vec<_> = supported_configs_range.collect();
+
+    // Prefer f32, then u8 as last resort
+    let wanted_config = supported_configs
+        .iter()
+        .find(|c| c.sample_format() == cpal::SampleFormat::F32)
+        .unwrap_or(&supported_configs[0]);
+
+    let config = wanted_config.clone().with_max_sample_rate();
 
     println!(
         "Output config: {:?}, channels: {}, sample rate: {}",
