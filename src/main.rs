@@ -4,6 +4,7 @@ use std::io::{BufReader, Write, stdout};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
+use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
 
 //internal includes
 mod helpers;
@@ -279,7 +280,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Print("Audio Library Test - Press 'q' to quit\n\n")
     )?;
 
-    let volume = 0.1;
+    let volume = Arc::new(std::sync::atomic::AtomicU32::new(0.1f32.to_bits()));
+    let vol_state = Arc::clone(&volume);
+
+    let mut is_paused = false;
+    let mut last_paused_state = false;
 
     let host = cpal::default_host();
     let device = host.default_output_device().unwrap();
@@ -312,7 +317,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(s) = cons.try_pop() {
                     last_sample = s;
                 }
-                *sample = (last_sample * volume).clamp(-1.0, 1.0);
+                let vol = f32::from_bits(vol_state.load(Ordering::Relaxed));
+                *sample = (last_sample * vol).clamp(-1.0, 1.0);
             }
         },
         |err| eprintln!("Stream error: {:?}", err),
@@ -323,34 +329,100 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key_event) = event::read()? {
-                if key_event.code == KeyCode::Char('q') {
-                    break;
+                if key_event.kind == event::KeyEventKind::Press {
+                    match key_event.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Left | KeyCode::Char('p') => {
+                            // Previous track - TODO: implement playlist navigation
+                        }
+                        KeyCode::Right | KeyCode::Char('n') => {
+                            // Next track - TODO: implement playlist navigation  
+                        }
+                        KeyCode::Char(' ') => {
+                            is_paused = !is_paused;
+                        }
+                        KeyCode::Char('+') | KeyCode::Char('=') => {
+                            let current_vol = f32::from_bits(volume.load(Ordering::Relaxed));
+                            let new_vol = (current_vol + 0.01).min(1.0);
+                            volume.store(new_vol.to_bits(), Ordering::Relaxed);
+                        }
+                        KeyCode::Char('-') | KeyCode::Char('_') => {
+                            let current_vol = f32::from_bits(volume.load(Ordering::Relaxed));
+                            let new_vol = (current_vol - 0.01).max(0.0);
+                            volume.store(new_vol.to_bits(), Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
                 }
+                // TODO: handle mouse events for clicking on controls
             }
         }
 
-        // redraw rainbow text every tick
-        let (cols, rows) = terminal::size()?;
-        let x = (cols as usize / 2)
-            .saturating_sub("Now Playing: Stare Into Death and Be Still".len() / 2);
-        let y = rows as usize / 2;
+        if is_paused != last_paused_state {
+            if is_paused {
+                stream.pause()?;
+            } else {
+                stream.play()?;
+            }
+            last_paused_state = is_paused;
+        }
 
+        // Clear the screen area we'll be drawing on
+        let (cols, rows) = terminal::size()?;
+        
+        // Draw the current track title
+        let track_text = "Now Playing: Stare Into Death and Be Still";
+        let x = (cols as usize / 2).saturating_sub(track_text.len() / 2);
+        let y = rows as usize / 2;
+        
         execute!(out, cursor::MoveTo(x as u16, y as u16))?;
-        for (i, ch) in "Now Playing: Stare Into Death and Be Still"
-            .chars()
-            .enumerate()
-        {
+        for (i, ch) in track_text.chars().enumerate() {
             let color = rainbow_color(i + tick);
             execute!(out, SetForegroundColor(color), Print(ch), ResetColor)?;
         }
+
+        // Draw playback controls
+        let controls = format!("  ◀◀    {}    ▶▶  ", if is_paused { "▶" } else { "⏸" });
+        let control_x = (cols as usize / 2).saturating_sub(controls.len() / 2);
+        let control_y = y + 2;
         
-        // TODO: Basic playback controls (Pause, Stop, Next, Previous)
-        //       - Next and Previous would require some kind of hardcoded playlist for now
-        // TODO: Basic Track status (Progress bar, time elapsed, etc)
+        execute!(out, cursor::MoveTo(control_x as u16, control_y as u16))?;
+        
+        // Color the controls
+        for (i, ch) in controls.chars().enumerate() {
+            let color = match ch {
+                '◀' => Color::Cyan,
+                '⏸' => Color::Yellow,
+                '▶' => {
+                    if controls.chars().nth(i-1) == Some(' ') && controls.chars().nth(i+1) == Some(' ') {
+                        Color::Green
+                    } else {
+                        Color::Cyan
+                    }
+                },
+                _ => Color::White,
+            };
+            execute!(out, SetForegroundColor(color), Print(ch), ResetColor)?;
+        }
+
+        // Draw instructions
+        let instructions = format!(
+            "◀/P=Prev | SPACE=Pause/Play | ▶/N=Next | +/-=Vol({:.0}%) | Q=Quit",
+            f32::from_bits(volume.load(Ordering::Relaxed)) * 100.0
+        );
+        let inst_x = (cols as usize / 2).saturating_sub(instructions.len() / 2);
+        let inst_y = control_y + 2;
+        
+        execute!(out, cursor::MoveTo(inst_x as u16, inst_y as u16))?;
+        execute!(out, SetForegroundColor(Color::DarkGrey), Print(instructions), ResetColor)?;
 
         out.flush()?;
-
-        tick = tick.wrapping_add(1);
+        
+        // Only increment tick if not paused
+        if !is_paused {
+            tick = tick.wrapping_add(1);
+        }
+        
         std::thread::sleep(Duration::from_millis(120));
     }
 
