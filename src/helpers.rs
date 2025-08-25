@@ -1,4 +1,13 @@
-use rubato::{FftFixedIn, SincFixedIn, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use rubato::{
+    FftFixedIn, 
+    SincFixedIn, 
+    FastFixedIn, 
+    PolynomialDegree, 
+    Resampler, 
+    SincInterpolationParameters, 
+    SincInterpolationType, 
+    WindowFunction
+};
 use anyhow::Error;
 
 pub fn pcm_to_f32(sample: i32, bits: u32, signed: bool) -> f32 {
@@ -32,13 +41,15 @@ fn calculate_optimal_sinc_len(output_rate: usize, channels: usize, base_len: usi
 
 // This Enum allows common handling of different resampler types
 pub enum ResamplerKind {
-    Fft,
-    Sinc,
+    Fast, // Polynomial interpolation, fastest but lower quality
+    Fft, // Fast Fourier Transform based, good quality and speed balance
+    Sinc, // Convolution with Sinc function, highest quality but slower
 }
 
 pub enum SimpleResampler {
+    Fast(FastFixedIn<f32>),
     Fft(FftFixedIn<f32>),
-    Sinc(SincFixedIn<f32>),
+    Sinc(SincFixedIn<f32>)
 }
 
 impl SimpleResampler {
@@ -51,13 +62,32 @@ impl SimpleResampler {
         channels: usize,
     ) -> Result<Self, Error> {
         match kind {
-            ResamplerKind::Fft => Ok(SimpleResampler::Fft(
-                FftFixedIn::<f32>::new(input_rate, output_rate, chunk_size, sub_chunks, channels)?
-            )),
+            ResamplerKind::Fast => {
+                Ok(SimpleResampler::Fast(
+                    FastFixedIn::<f32>::new(
+                        output_rate as f64 / input_rate as f64,
+                        10.0,
+                        PolynomialDegree::Septic, // 7th order polynomial
+                        chunk_size,
+                        channels
+                    )?
+                ))
+            },
+            ResamplerKind::Fft => {
+                Ok(SimpleResampler::Fft(
+                    FftFixedIn::<f32>::new(
+                        input_rate, 
+                        output_rate, 
+                        chunk_size, 
+                        sub_chunks, 
+                        channels
+                    )?
+                ))
+            },
             ResamplerKind::Sinc => {
                 let base_sinc_len = 256;
                 let adaptive_sinc_len = calculate_optimal_sinc_len(output_rate, channels, base_sinc_len);
-                println!("Adaptive Sinc: {}Hz -> {}Hz, using sinc_len: {} (requested: {})", 
+                println!("Adaptive Sinc: {}Hz -> {}Hz, using sinc_len: {} (max: {})",
                          input_rate, output_rate, adaptive_sinc_len, base_sinc_len);
                 let params = SincInterpolationParameters {
                     sinc_len: adaptive_sinc_len,
@@ -72,7 +102,7 @@ impl SimpleResampler {
                         10.0,
                         params,
                         chunk_size,
-                        channels,
+                        channels
                     )?
                 ))
             }
@@ -82,8 +112,9 @@ impl SimpleResampler {
     /// Allocate an output buffer for this resampler
     pub fn output_buffer_allocate(&self, filled: bool) -> Vec<Vec<f32>> {
         match self {
+            SimpleResampler::Fast(r) => r.output_buffer_allocate(filled),
             SimpleResampler::Fft(r) => r.output_buffer_allocate(filled),
-            SimpleResampler::Sinc(r) => r.output_buffer_allocate(filled),
+            SimpleResampler::Sinc(r) => r.output_buffer_allocate(filled)
         }
     }
 
@@ -95,12 +126,13 @@ impl SimpleResampler {
         end: Option<&[bool]>,
     ) -> Result<(usize, usize), Error> {
         match self {
+            SimpleResampler::Fast(r) => Ok(r.process_into_buffer(input, output, end)?),
             SimpleResampler::Fft(r) => Ok(r.process_into_buffer(input, output, end)?),
-            SimpleResampler::Sinc(r) => Ok(r.process_into_buffer(input, output, end)?),
+            SimpleResampler::Sinc(r) => Ok(r.process_into_buffer(input, output, end)?)
         }
     }
 
-    // Process a partial chunk (only for Sinc resampler)
+    /// Process a partial chunk (only for Sinc and Fast resamplers)
     pub fn process_partial_into_buffer(
         &mut self,
         input: &[&[f32]],
@@ -108,15 +140,23 @@ impl SimpleResampler {
         end: Option<&[bool]>,
     ) -> Result<(usize, usize), Error> {
         match self {
+            SimpleResampler::Fast(r) => {
+                let input_opt = if input.is_empty() {
+                    None
+                } else {
+                    Some(input)
+                };
+                Ok(r.process_partial_into_buffer(input_opt, output, end)?)
+            },
             SimpleResampler::Fft(r) => {
                 // FFT resampler doesn't have a separate partial method
                 Ok(r.process_into_buffer(input, output, end)?)
             },
             SimpleResampler::Sinc(r) => {
-                let input_opt = if input.is_empty() { 
-                    None 
-                } else { 
-                    Some(input) 
+                let input_opt = if input.is_empty() {
+                    None
+                } else {
+                    Some(input)
                 };
                 Ok(r.process_partial_into_buffer(input_opt, output, end)?)
             }

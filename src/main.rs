@@ -18,9 +18,10 @@ use crossterm::{
     event::{self, Event, KeyCode},
     execute,
     style::{Color, Print, ResetColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType},
+    terminal::{self},
 };
-use lewton::inside_ogg::OggStreamReader;
+// TODO use lewton::inside_ogg::OggStreamReader;
+// use above include for Vorbuis support
 use minimp3::Decoder as Minimp3Decoder;
 use ogg::reading::PacketReader;
 use opus::{Channels, Decoder as OpusDecoder};
@@ -28,7 +29,6 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Producer, Split},
 };
-use rubato::{FftFixedIn, Resampler};
 
 fn rainbow_color(i: usize) -> Color {
     match i % 6 {
@@ -101,7 +101,7 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
             let sub_chunks = 1;
 
             let resampler = SimpleResampler::new(
-                ResamplerKind::Fft,
+                ResamplerKind::Fast,
                 file_rate,
                 device_rate,
                 chunk_size,
@@ -194,8 +194,8 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
         }
 
         "ogg" => {
-            let mut file_rate = 48000; // Opus always decodes to 48kHz
-            let mut channels = 2; // TODO: Get actual channel count from Opus Header
+            let file_rate = 48000; // Opus always decodes to 48kHz
+            let channels = 2; // TODO: Get actual channel count from Opus Header
             let chunk_size = 960;
             let sub_chunks = 1;
             
@@ -300,7 +300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // spawn decoder
     // TODO: separate track header collection from decoding for up or downmixing
     //       channels. (Stereo -> Mono, 5.1 -> Stereo, etc)
-    let path = Path::new("test-tracks/Stare Into Death and Be Still Opus.ogg");
+    let path = Path::new("test-tracks/Stare Into Death and Be Still Flac.flac");
     thread::spawn(move || play_audio_file(path, prod, device_rate));
 
     // CPAL output
