@@ -87,8 +87,6 @@ impl SimpleResampler {
             ResamplerKind::Sinc => {
                 let base_sinc_len = 256;
                 let adaptive_sinc_len = calculate_optimal_sinc_len(output_rate, channels, base_sinc_len);
-                println!("Adaptive Sinc: {}Hz -> {}Hz, using sinc_len: {} (max: {})",
-                         input_rate, output_rate, adaptive_sinc_len, base_sinc_len);
                 let params = SincInterpolationParameters {
                     sinc_len: adaptive_sinc_len,
                     f_cutoff: 0.90,

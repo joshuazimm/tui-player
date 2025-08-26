@@ -4,25 +4,27 @@ use std::io::{BufReader, Write, stdout};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
-use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+use std::sync::{Arc, atomic::{AtomicU32, AtomicBool, Ordering}};
 
-//internal includes
-mod helpers;
-use helpers::{pcm_to_f32, SimpleResampler, ResamplerKind};
+// internal includes
+mod resampler;
+use resampler::{pcm_to_f32, SimpleResampler, ResamplerKind};
+mod widget;
+use widget::{Layout, Section, Rect};
+mod widgets;
+use widgets::{WidgetKind, Label, Controls};
 
 // external includes
 // TODO: Find Filesystem crate for cross platform path handling
 use claxon::FlacReader;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
-    cursor,
     event::{self, Event, KeyCode},
     execute,
-    style::{Color, Print, ResetColor, SetForegroundColor},
-    terminal::{self},
+    terminal::{self, ClearType, Clear},
 };
-// TODO use lewton::inside_ogg::OggStreamReader;
-// use above include for Vorbuis support
+// use lewton::inside_ogg::OggStreamReader;
+// TODO: use above include for Vorbis support
 use minimp3::Decoder as Minimp3Decoder;
 use ogg::reading::PacketReader;
 use opus::{Channels, Decoder as OpusDecoder};
@@ -31,17 +33,6 @@ use ringbuf::{
     traits::{Consumer, Producer, Split},
 };
 
-fn rainbow_color(i: usize) -> Color {
-    match i % 6 {
-        0 => Color::Red,
-        1 => Color::Yellow,
-        2 => Color::Green,
-        3 => Color::Cyan,
-        4 => Color::Blue,
-        _ => Color::Magenta,
-    }
-}
-
 fn process_audio_chunks<F>(
     mut resampler: SimpleResampler,
     channels: usize,
@@ -49,7 +40,7 @@ fn process_audio_chunks<F>(
     mut fill_buffers: F,
     prod: &mut HeapProd<f32>,
 ) where
-    F: FnMut(&mut Vec<Vec<f32>>) -> (usize, bool), // returns (frames_collected, eof)
+    F: FnMut(&mut Vec<Vec<f32>>) -> (usize, bool),
 {
     let mut buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
     let mut out_buf = resampler.output_buffer_allocate(true);
@@ -60,7 +51,7 @@ fn process_audio_chunks<F>(
             buffers[ch].truncate(0);
         }
 
-        // Fill buffers using the provided closure
+        // Fill buffers using decoder callback
         let (frames_collected, eof) = fill_buffers(&mut buffers);
 
         if frames_collected > 0 {
@@ -267,23 +258,14 @@ fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<
     }
 }
 
-// --- Usage ---
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tick = 0usize;
     let mut out = stdout();
     terminal::enable_raw_mode()?;
 
-    execute!(
-        out,
-        terminal::Clear(terminal::ClearType::All),
-        cursor::MoveTo(0, 0),
-        Print("Audio Library Test - Press 'q' to quit\n\n")
-    )?;
-
-    let volume = Arc::new(std::sync::atomic::AtomicU32::new(0.1f32.to_bits()));
+    let volume = Arc::new(AtomicU32::new(0.1f32.to_bits()));
     let vol_state = Arc::clone(&volume);
 
-    let mut is_paused = false;
+    let is_paused = Arc::new(AtomicBool::new(false));
     let mut last_paused_state = false;
 
     let host = cpal::default_host();
@@ -296,11 +278,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_sample_rate();
 
     let device_rate = wanted_config.sample_rate().0 as usize;
-    println!("Output sample rate: {}", device_rate);
 
     // TODO: change buffer size based on number of output channels
     let rb = HeapRb::<f32>::new(device_rate * 2);
     let (prod, mut cons): (HeapProd<f32>, HeapCons<f32>) = rb.split();
+
+    // define view layout
+    // TODO: Move to separate config file & add xml parsing
+    let mut layout = Layout {
+        sections: vec![
+            Section {
+                rect: Rect { x: 0, y: 0, width: 80, height: 3 },
+                border: true,
+                widget: WidgetKind::Label(Label {
+                    text: "Now Playing: Stare Into Death and Be Still".into(),
+                    align_center: true,
+                    rainbow: true,
+                    tick: 0,
+                }),
+            },
+            Section {
+                rect: Rect { x: 0, y: 4, width: 80, height: 3 },
+                border: true,
+                widget: WidgetKind::Controls(Controls::new(
+                    Arc::clone(&is_paused), 
+                    Arc::clone(&volume)
+                )),
+            },
+        ],
+    };
 
     // spawn decoder
     // TODO: separate track header collection from decoding for up or downmixing
@@ -326,7 +332,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     stream.play()?;
 
+    // main view loop
     loop {
+        // key callback handling
+        // TODO: Move to abstracted class for changing keybinds
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key_event) = event::read()? {
                 if key_event.kind == event::KeyEventKind::Press {
@@ -339,7 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Next track - TODO: implement playlist navigation  
                         }
                         KeyCode::Char(' ') => {
-                            is_paused = !is_paused;
+                            is_paused.swap(!is_paused.load(Ordering::Relaxed), Ordering::Relaxed);
                         }
                         KeyCode::Char('+') | KeyCode::Char('=') => {
                             let current_vol = f32::from_bits(volume.load(Ordering::Relaxed));
@@ -358,70 +367,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if is_paused != last_paused_state {
-            if is_paused {
+        let pause = is_paused.load(Ordering::Relaxed);
+        if pause != last_paused_state {
+            if pause {
                 stream.pause()?;
             } else {
                 stream.play()?;
             }
-            last_paused_state = is_paused;
+            last_paused_state = pause;
         }
 
-        // Clear the screen area we'll be drawing on
-        let (cols, rows) = terminal::size()?;
-        
-        // Draw the current track title
-        let track_text = "Now Playing: Stare Into Death and Be Still";
-        let x = (cols as usize / 2).saturating_sub(track_text.len() / 2);
-        let y = rows as usize / 2;
-        
-        execute!(out, cursor::MoveTo(x as u16, y as u16))?;
-        for (i, ch) in track_text.chars().enumerate() {
-            let color = rainbow_color(i + tick);
-            execute!(out, SetForegroundColor(color), Print(ch), ResetColor)?;
-        }
+        // I imagine we'll want to throttle updates depending on
+        // the widget at some point so this is just for convenience
 
-        // Draw playback controls
-        let controls = format!("  ◀◀    {}    ▶▶  ", if is_paused { "▶" } else { "⏸" });
-        let control_x = (cols as usize / 2).saturating_sub(controls.len() / 2);
-        let control_y = y + 2;
+        // TODO: We should define a periodic rate for updates on each
+        // Widget and deal with them in a separate thread
+        layout.update_all()?;
         
-        execute!(out, cursor::MoveTo(control_x as u16, control_y as u16))?;
-        
-        // Color the controls
-        for (i, ch) in controls.chars().enumerate() {
-            let color = match ch {
-                '◀' => Color::Cyan,
-                '⏸' => Color::Yellow,
-                '▶' => {
-                    if controls.chars().nth(i-1) == Some(' ') && controls.chars().nth(i+1) == Some(' ') {
-                        Color::Green
-                    } else {
-                        Color::Cyan
-                    }
-                },
-                _ => Color::White,
-            };
-            execute!(out, SetForegroundColor(color), Print(ch), ResetColor)?;
-        }
+        // TODO: This is causing flicker, we need to implement double
+        // buffering using Crossterm's AlternateScreen.
+        execute!(out, Clear(ClearType::All))?;
 
-        // Draw instructions
-        let instructions = format!(
-            "◀/P=Prev | SPACE=Pause/Play | ▶/N=Next | +/-=Vol({:.0}%) | Q=Quit",
-            f32::from_bits(volume.load(Ordering::Relaxed)) * 100.0
-        );
-        let inst_x = (cols as usize / 2).saturating_sub(instructions.len() / 2);
-        let inst_y = control_y + 2;
-        
-        execute!(out, cursor::MoveTo(inst_x as u16, inst_y as u16))?;
-        execute!(out, SetForegroundColor(Color::DarkGrey), Print(instructions), ResetColor)?;
+        layout.render_all(&mut out)?;
 
         out.flush()?;
-        
-        // Only increment tick if not paused
-        if !is_paused {
-            tick = tick.wrapping_add(1);
-        }
         
         std::thread::sleep(Duration::from_millis(120));
     }
