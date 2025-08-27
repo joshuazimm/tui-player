@@ -1,12 +1,7 @@
 // TODO: Since this will be a commonly repeated filetype
 //       consider making autogen or at least templating
 //       common parts of the code
-use crossterm::{
-    cursor,
-    style::{Print, SetForegroundColor, ResetColor, Color},
-    execute,
-};
-use std::io::{Stdout, Result};
+use crossterm::{style::{SetForegroundColor, ResetColor, Color}, cursor};
 use crate::widget::{Rect, Widget};
 
 #[derive(Debug, Clone)]
@@ -33,7 +28,7 @@ impl Widget for Label {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    fn render(&self, area: &Rect, out: &mut Stdout) -> Result<()> {
+    fn render(&self, area: &Rect, buf: &mut String) -> std::io::Result<()> {
         let x_start = if self.align_center {
             area.x + (area.width.saturating_sub(self.text.len() as u16) / 2)
         } else {
@@ -45,23 +40,23 @@ impl Widget for Label {
             for (i, ch) in self.text.chars().enumerate() {
                 let x = x_start + i as u16;
                 let color = rainbow_color(i + self.tick);
-                execute!(
-                    out,
+                buf.push_str(&format!(
+                    "{}{}{}{}",
                     cursor::MoveTo(x, y),
                     SetForegroundColor(color),
-                    Print(ch),
+                    ch,
                     ResetColor
-                )?;
+                ));
             }
-            Ok(())
         } else {
-            execute!(
-                out,
+            buf.push_str(&format!(
+                "{}{}{}{}",
                 cursor::MoveTo(x_start, y),
                 SetForegroundColor(Color::White),
-                Print(&self.text),
+                self.text,
                 ResetColor
-            )
+            ));
         }
+        Ok(())
     }
 }

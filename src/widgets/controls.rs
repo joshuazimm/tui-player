@@ -1,11 +1,6 @@
 use crate::widget::{Rect, Widget};
 use std::sync::{Arc, atomic::{AtomicU32, Ordering, AtomicBool}};
-use crossterm::{
-    cursor,
-    execute,
-    style::{Color, Print, ResetColor, SetForegroundColor}
-};
-use std::io::{Result, Stdout};
+use crossterm::{style::{SetForegroundColor, ResetColor, Color}, cursor};
 
 #[derive(Debug, Clone)]
 pub struct Controls {
@@ -36,15 +31,24 @@ impl Widget for Controls {
         );
     }
 
-    fn render(&self, area: &Rect, out: &mut Stdout) -> Result<()> {
-        let x = area.x + (area.width.saturating_sub(self.cached_text.len() as u16) / 2);
+    fn render(&self, area: &Rect, buf: &mut String) -> std::io::Result<()> {
         let y = area.y + (area.height / 2);
-        execute!(
-            out,
+
+        // clear line avoiding vertical borders
+        buf.push_str(&format!(
+            "{}{}",
+            cursor::MoveTo(area.x+1, y),
+            " ".repeat((area.width - 2) as usize)
+        ));
+
+        let x = area.x + (area.width.saturating_sub(self.cached_text.len() as u16) / 2);
+        buf.push_str(&format!(
+            "{}{}{}{}",
             cursor::MoveTo(x, y),
             SetForegroundColor(Color::Cyan),
-            Print(&self.cached_text),
+            self.cached_text,
             ResetColor
-        )
+        ));
+        Ok(())
     }
 }

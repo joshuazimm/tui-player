@@ -1,6 +1,6 @@
 // std includes
 use std::fs::File;
-use std::io::{BufReader, Write, stdout};
+use std::io::{BufReader, stdout};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -21,7 +21,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
-    terminal::{self, ClearType, Clear},
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    cursor::{Hide, Show}
 };
 // use lewton::inside_ogg::OggStreamReader;
 // TODO: use above include for Vorbis support
@@ -261,8 +262,9 @@ fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout();
     terminal::enable_raw_mode()?;
+    execute!(out, EnterAlternateScreen, Hide)?;
 
-    let volume = Arc::new(AtomicU32::new(0.1f32.to_bits()));
+    let volume = Arc::new(AtomicU32::new(0.05f32.to_bits()));
     let vol_state = Arc::clone(&volume);
 
     let is_paused = Arc::new(AtomicBool::new(false));
@@ -383,18 +385,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // TODO: We should define a periodic rate for updates on each
         // Widget and deal with them in a separate thread
         layout.update_all()?;
-        
-        // TODO: This is causing flicker, we need to implement double
-        // buffering using Crossterm's AlternateScreen.
-        execute!(out, Clear(ClearType::All))?;
 
         layout.render_all(&mut out)?;
-
-        out.flush()?;
         
         std::thread::sleep(Duration::from_millis(120));
     }
 
+    execute!(out, LeaveAlternateScreen, Show)?;
     terminal::disable_raw_mode()?;
     Ok(())
 }
