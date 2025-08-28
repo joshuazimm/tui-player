@@ -29,13 +29,15 @@ impl Widget for Label {
     }
 
     fn render(&self, area: &Rect, buf: &mut String) -> std::io::Result<()> {
+        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute();
+        
         let x_start = if self.align_center {
-            area.x + (area.width.saturating_sub(self.text.len() as u16) / 2)
+            abs_x + (abs_width.saturating_sub(self.text.len() as u16) / 2)
         } else {
-            area.x
+            abs_x
         };
-        let y = area.y + (area.height / 2);
-
+        let y = abs_y + (abs_height / 2);
+        
         if self.rainbow {
             for (i, ch) in self.text.chars().enumerate() {
                 let x = x_start + i as u16;
@@ -57,6 +59,7 @@ impl Widget for Label {
                 ResetColor
             ));
         }
+        
         Ok(())
     }
 }

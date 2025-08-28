@@ -2,30 +2,28 @@
 use std::fs::File;
 use std::io::{BufReader, stdout};
 use std::path::Path;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
-};
 use std::thread;
 use std::time::Duration;
+use std::sync::{Arc, atomic::{AtomicU32, AtomicBool, Ordering}};
 
 // internal includes
 mod resampler;
-use resampler::{ResamplerKind, SimpleResampler, pcm_to_f32};
+use resampler::{pcm_to_f32, ResamplerKind, SimpleResampler};
 mod widget;
-use widget::{Layout, Rect, Section};
+use widget::{Layout, Section, Rect};
 mod widgets;
-use widgets::{Controls, Label, WidgetKind};
+use widgets::{WidgetKind, Label, Controls};
+mod keyhandler;
+use keyhandler::KeyHandler;
 
 // external includes
 // TODO: Find Filesystem crate for cross platform path handling
 use claxon::FlacReader;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
-    cursor::{Hide, Show},
-    event::{self, Event, KeyCode},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    cursor::{Hide, Show}
 };
 // use lewton::inside_ogg::OggStreamReader;
 // TODO: use above include for Vorbis support
@@ -62,15 +60,11 @@ fn process_audio_chunks<F>(
             // Process the chunk
             let input_refs: Vec<&[f32]> = buffers.iter().map(|b| b.as_slice()).collect();
             let (_in_used, out_written) = if frames_collected < chunk_size {
-                resampler
-                    .process_partial_into_buffer(&input_refs, &mut out_buf, None)
-                    .unwrap()
+                resampler.process_partial_into_buffer(&input_refs, &mut out_buf, None).unwrap()
             } else {
-                resampler
-                    .process_into_buffer(&input_refs, &mut out_buf, None)
-                    .unwrap()
+                resampler.process_into_buffer(&input_refs, &mut out_buf, None).unwrap()
             };
-
+            
             // Convert resampler output buffer to Vec<Vec<f32>> format
             let output_vecs: Vec<Vec<f32>> = (0..channels)
                 .map(|ch| out_buf[ch][..out_written].to_vec())
@@ -107,8 +101,7 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
                 chunk_size,
                 sub_chunks,
                 channels,
-            )
-            .unwrap();
+            ).unwrap();
 
             let mut sample_iter = reader.samples();
 
@@ -119,7 +112,7 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
                 |buffers| {
                     let mut frames_collected = 0;
                     let mut eof = false;
-
+                    
                     while frames_collected < chunk_size {
                         for ch in 0..channels {
                             match sample_iter.next() {
@@ -137,10 +130,10 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
                         if eof {
                             break;
                         }
-
+                        
                         frames_collected += 1;
                     }
-
+                    
                     (frames_collected, eof)
                 },
                 &mut prod,
@@ -154,7 +147,7 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
             let file_rate = first_frame.sample_rate as usize;
             let channels = first_frame.channels;
             let sub_chunks = 1;
-
+            
             let resampler = SimpleResampler::new(
                 ResamplerKind::Sinc,
                 file_rate,
@@ -162,12 +155,12 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
                 chunk_size,
                 sub_chunks,
                 channels,
-            )
-            .unwrap();
-
-            let mut frame_iter = std::iter::once(Ok(first_frame))
-                .chain(std::iter::from_fn(|| Some(decoder.next_frame())));
-
+            ).unwrap();
+            
+            let mut frame_iter = std::iter::once(Ok(first_frame)).chain(std::iter::from_fn(|| {
+                Some(decoder.next_frame())
+            }));
+            
             process_audio_chunks(
                 resampler,
                 channels,
@@ -199,7 +192,7 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
             let channels = 2; // TODO: Get actual channel count from Opus Header
             let chunk_size = 960;
             let sub_chunks = 1;
-
+            
             let resampler = SimpleResampler::new(
                 ResamplerKind::Fft,
                 file_rate,
@@ -207,22 +200,14 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
                 chunk_size,
                 sub_chunks,
                 channels,
-            )
-            .unwrap();
-
+            ).unwrap();
+            
             // Open file handle for packet reading
             let file_for_packets = BufReader::new(File::open(path).unwrap());
-            let mut decoder = OpusDecoder::new(
-                file_rate as u32,
-                if channels == 1 {
-                    Channels::Mono
-                } else {
-                    Channels::Stereo
-                },
-            )
-            .unwrap();
+            let mut decoder = OpusDecoder::new(file_rate as u32, 
+                if channels == 1 { Channels::Mono } else { Channels::Stereo }).unwrap();
             let mut packet_reader = PacketReader::new(file_for_packets);
-
+            
             process_audio_chunks(
                 resampler,
                 channels,
@@ -234,11 +219,8 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
                     while frames_collected < chunk_size {
                         if let Some(packet) = packet_reader.read_packet().ok().flatten() {
                             let mut pcm_tmp = vec![0i16; chunk_size * channels];
-                            if let Ok(samples_decoded) =
-                                decoder.decode(&packet.data, &mut pcm_tmp, false)
-                            {
-                                for frame in pcm_tmp[..samples_decoded * channels].chunks(channels)
-                                {
+                            if let Ok(samples_decoded) = decoder.decode(&packet.data, &mut pcm_tmp, false) {
+                                for frame in pcm_tmp[..samples_decoded * channels].chunks(channels) {
                                     for ch in 0..channels {
                                         buffers[ch].push(frame[ch] as f32 / 32768.0);
                                     }
@@ -304,42 +286,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rb = HeapRb::<f32>::new(device_rate * 2);
     let (prod, mut cons): (HeapProd<f32>, HeapCons<f32>) = rb.split();
 
-    // define view layout
+    // Define view layout
     // TODO: Move to separate config file & add xml parsing
     let mut layout = Layout {
         sections: vec![
-            Section {
-                rect: Rect {
-                    x: 0,
-                    y: 0,
-                    width: 80,
-                    height: 3,
-                },
-                border: true,
-                widget: WidgetKind::Label(Label {
+            Section::new(
+                Rect { x: 0.0, y: 0.0, width: 0.5, height: 0.2 },
+                true,
+                WidgetKind::Label(Label {
                     text: "Now Playing: Stare Into Death and Be Still".into(),
                     align_center: true,
                     rainbow: true,
                     tick: 0,
                 }),
-            },
-            Section {
-                rect: Rect {
-                    x: 0,
-                    y: 4,
-                    width: 80,
-                    height: 3,
-                },
-                border: true,
-                widget: WidgetKind::Controls(Controls::new(
-                    Arc::clone(&is_paused),
-                    Arc::clone(&volume),
+            ),
+            Section::new(
+                Rect { x: 0.5, y: 0.0, width: 0.5, height: 0.2 },
+                true,
+                WidgetKind::Controls(Controls::new(
+                    Arc::clone(&is_paused), 
+                    Arc::clone(&volume)
                 )),
-            },
+            ),
         ],
     };
 
-    // spawn decoder
+    // Spawn keyhandler
+    let mut key_handler = KeyHandler::new(Arc::clone(&is_paused), Arc::clone(&volume));
+    key_handler.start();
+
+    // Spawn decoder
     // TODO: separate track header collection from decoding for up or downmixing
     //       channels. (Stereo -> Mono, 5.1 -> Stereo, etc)
     let path = Path::new("test-tracks/Stare Into Death and Be Still Flac.flac");
@@ -363,39 +339,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     stream.play()?;
 
-    // main view loop
+    // Main view loop
     loop {
-        // key callback handling
-        // TODO: Move to abstracted class for changing keybinds
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key_event) = event::read()? {
-                if key_event.kind == event::KeyEventKind::Press {
-                    match key_event.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Left | KeyCode::Char('p') => {
-                            // Previous track - TODO: implement playlist navigation
-                        }
-                        KeyCode::Right | KeyCode::Char('n') => {
-                            // Next track - TODO: implement playlist navigation
-                        }
-                        KeyCode::Char(' ') => {
-                            is_paused.swap(!is_paused.load(Ordering::Relaxed), Ordering::Relaxed);
-                        }
-                        KeyCode::Char('+') | KeyCode::Char('=') => {
-                            let current_vol = f32::from_bits(volume.load(Ordering::Relaxed));
-                            let new_vol = (current_vol + 0.01).min(1.0);
-                            volume.store(new_vol.to_bits(), Ordering::Relaxed);
-                        }
-                        KeyCode::Char('-') | KeyCode::Char('_') => {
-                            let current_vol = f32::from_bits(volume.load(Ordering::Relaxed));
-                            let new_vol = (current_vol - 0.01).max(0.0);
-                            volume.store(new_vol.to_bits(), Ordering::Relaxed);
-                        }
-                        _ => {}
-                    }
-                }
-                // TODO: handle mouse events for clicking on controls
-            }
+        if key_handler.should_quit() {
+            break;
         }
 
         let pause = is_paused.load(Ordering::Relaxed);
@@ -416,10 +363,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         layout.update_all()?;
 
         layout.render_all(&mut out)?;
-
+        
         std::thread::sleep(Duration::from_millis(120));
     }
 
+    key_handler.stop();
     execute!(out, LeaveAlternateScreen, Show)?;
     terminal::disable_raw_mode()?;
     Ok(())
