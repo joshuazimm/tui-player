@@ -1,10 +1,12 @@
 use crate::widget::{Rect, Widget};
 use crossterm::{
     cursor,
-    style::{Color, ResetColor, SetForegroundColor},
+    style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
 };
 use std::fs;
 use std::path::PathBuf;
+
+static padding: u16 = 1;
 
 #[derive(Debug, Clone)]
 pub struct FileList {
@@ -13,6 +15,12 @@ pub struct FileList {
     pub rainbow: bool,
     pub tick: usize,
     pub files: Vec<String>,
+    pub selected: u16,
+}
+
+pub struct File {
+    pub name: String,
+    pub length: u8, //in seconds
 }
 
 fn rainbow_color(i: usize) -> Color {
@@ -43,12 +51,14 @@ fn get_files(path: PathBuf) -> Vec<String> {
 
 impl FileList {
     pub fn new(path: PathBuf) -> FileList {
+        let files = get_files(path.clone());
         Self {
             path: path.clone(),
-            align_center: true,
-            rainbow: true,
+            align_center: false,
+            rainbow: false,
             tick: 1,
-            files: get_files(path),
+            files,
+            selected: 0,
         }
     }
 }
@@ -63,34 +73,49 @@ impl Widget for FileList {
 
         // Only render as many lines as fit in the area
         for (i, line) in self.files.iter().enumerate() {
-            if i as u16 >= abs_height {
-                break; // prevent overflow
+            if i as u16 > abs_height - padding {
+                break;
             }
 
             let x_start = if self.align_center {
                 abs_x + (abs_width.saturating_sub(line.len() as u16) / 2)
             } else {
-                abs_x
+                abs_x + padding
             };
-            let y = abs_y + i as u16;
+            let y = (abs_y + padding) + i as u16;
+
+            // set up highlight colors
+            let (default_fg, bg) = if i == self.selected as usize {
+                (Color::Black, Some(Color::White))
+            } else {
+                (Color::White, None)
+            };
 
             if self.rainbow {
                 for (j, ch) in line.chars().enumerate() {
                     let x = x_start + j as u16;
-                    let color = rainbow_color(j + self.tick);
+                    let fg = if i == self.selected as usize {
+                        Color::Black // override
+                    } else {
+                        rainbow_color(j + self.tick)
+                    };
                     buf.push_str(&format!(
-                        "{}{}{}{}",
+                        "{}{}{}{}{}",
                         cursor::MoveTo(x, y),
-                        SetForegroundColor(color),
+                        SetForegroundColor(fg),
+                        bg.map(|c| SetBackgroundColor(c).to_string())
+                            .unwrap_or_default(),
                         ch,
                         ResetColor
                     ));
                 }
             } else {
                 buf.push_str(&format!(
-                    "{}{}{}{}",
+                    "{}{}{}{}{}",
                     cursor::MoveTo(x_start, y),
-                    SetForegroundColor(Color::White),
+                    SetForegroundColor(default_fg),
+                    bg.map(|c| SetBackgroundColor(c).to_string())
+                        .unwrap_or_default(),
                     line,
                     ResetColor
                 ));

@@ -1,9 +1,8 @@
 use std::io::Write;
 
-use enum_dispatch::enum_dispatch;
 use crate::widgets::WidgetKind;
 use crossterm::{cursor, terminal::size};
-
+use enum_dispatch::enum_dispatch;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Rect {
@@ -28,7 +27,7 @@ pub struct Section {
     pub rect: Rect,
     pub last_absolute_size: Option<(u16, u16, u16, u16)>,
     pub border: bool,
-    pub widget: WidgetKind
+    pub widget: WidgetKind,
 }
 
 impl Section {
@@ -40,26 +39,27 @@ impl Section {
             last_absolute_size: None,
         }
     }
-    
+
     pub fn clear_area(&self, buf: &mut String) -> (u16, u16, u16, u16) {
         let current_abs = self.rect.to_absolute();
-        
+
         // Get the area to clear (max of current and last size)
-        let (clear_x, clear_y, clear_width, clear_height) = if let Some(last_abs) = self.last_absolute_size {
-            let (curr_x, curr_y, curr_w, curr_h) = current_abs;
-            let (last_x, last_y, last_w, last_h) = last_abs;
-            
-            let min_x = curr_x.min(last_x);
-            let min_y = curr_y.min(last_y);
-            let max_right = (curr_x + curr_w).max(last_x + last_w);
-            let max_bottom = (curr_y + curr_h).max(last_y + last_h);
-            
-            (min_x, min_y, max_right - min_x, max_bottom - min_y)
-        } else {
-            // First render, just use current size
-            current_abs
-        };
-        
+        let (clear_x, clear_y, clear_width, clear_height) =
+            if let Some(last_abs) = self.last_absolute_size {
+                let (curr_x, curr_y, curr_w, curr_h) = current_abs;
+                let (last_x, last_y, last_w, last_h) = last_abs;
+
+                let min_x = curr_x.min(last_x);
+                let min_y = curr_y.min(last_y);
+                let max_right = (curr_x + curr_w).max(last_x + last_w);
+                let max_bottom = (curr_y + curr_h).max(last_y + last_h);
+
+                (min_x, min_y, max_right - min_x, max_bottom - min_y)
+            } else {
+                // First render, just use current size
+                current_abs
+            };
+
         // Clear the calculated area
         for dy in 0..clear_height {
             buf.push_str(&format!(
@@ -68,7 +68,7 @@ impl Section {
                 " ".repeat(clear_width as usize)
             ));
         }
-        
+
         current_abs
     }
 }
@@ -106,31 +106,31 @@ impl Layout {
 
     fn draw_border(rect: &Rect, buf: &mut String) -> std::io::Result<()> {
         let (abs_x, abs_y, abs_width, abs_height) = rect.to_absolute();
-        
+
         let top = abs_y;
         let bottom = abs_y + abs_height.saturating_sub(1);
         let left = abs_x;
         let right = abs_x + abs_width.saturating_sub(1);
-        
+
         // Corners
         buf.push_str(&format!("{}┌", cursor::MoveTo(left, top)));
         buf.push_str(&format!("{}┐", cursor::MoveTo(right, top)));
         buf.push_str(&format!("{}└", cursor::MoveTo(left, bottom)));
         buf.push_str(&format!("{}┘", cursor::MoveTo(right, bottom)));
-        
+
         // Horizontal lines
         for dx in 1..abs_width.saturating_sub(1) {
             buf.push_str(&format!("{}─", cursor::MoveTo(left + dx, top)));
             buf.push_str(&format!("{}─", cursor::MoveTo(left + dx, bottom)));
         }
-        
+
         // Vertical lines
         for dy in 1..abs_height.saturating_sub(1) {
             buf.push_str(&format!("{}│", cursor::MoveTo(left, top + dy)));
             buf.push_str(&format!("{}│", cursor::MoveTo(right, top + dy)));
         }
-        
+
         Ok(())
     }
-
 }
+
