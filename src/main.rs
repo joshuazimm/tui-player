@@ -292,6 +292,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_paused = Arc::new(AtomicBool::new(false));
     let mut last_paused_state = false;
 
+    let select_index = Arc::new(AtomicU32::new(0));
+    let enter_pressed = Arc::new(AtomicBool::new(false));
+
     let host = cpal::default_host();
     let device = host.default_output_device().unwrap();
     let wanted_config = device
@@ -306,6 +309,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TODO: change buffer size based on number of output channels
     let rb = HeapRb::<f32>::new(device_rate * 2);
     let (prod, mut cons): (HeapProd<f32>, HeapCons<f32>) = rb.split();
+
+    let file_list = FileList::new(PathBuf::from("test-tracks"), Arc::clone(&select_index));
 
     // Define view layout
     // TODO: Move to separate config file & add xml parsing
@@ -345,13 +350,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     height: 0.2,
                 },
                 true,
-                WidgetKind::FileList(FileList::new(PathBuf::from("test-tracks"))),
+                WidgetKind::FileList(file_list),
             ),
         ],
     };
 
     // Spawn keyhandler
-    let mut key_handler = KeyHandler::new(Arc::clone(&is_paused), Arc::clone(&volume));
+    let mut key_handler = KeyHandler::new(
+        Arc::clone(&is_paused),
+        Arc::clone(&volume),
+        Arc::clone(&select_index),
+        Arc::clone(&enter_pressed),
+    );
     key_handler.start();
 
     // Spawn decoder
@@ -392,6 +402,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stream.play()?;
             }
             last_paused_state = pause;
+        }
+
+        let new_track = enter_pressed.load(Ordering::Relaxed);
+        if new_track {
+            let index = select_index.load(Ordering::Relaxed);
+            if let Some(file_list) = layout.sections[1].widget.as_file_list() {
+                if let Some(path_str) = file_list.get_file_from_index(index) {
+                    let mut path = file_list.get_path();
+                    path.push(path_str);
+                    // TO DO figure out how to play a new track i.e. kill the thread and spawn a
+                    // new stream
+                }
+            }
         }
 
         // I imagine we'll want to throttle updates depending on

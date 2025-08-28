@@ -5,6 +5,10 @@ use crossterm::{
 };
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 
 static padding: u16 = 1;
 
@@ -15,7 +19,7 @@ pub struct FileList {
     pub rainbow: bool,
     pub tick: usize,
     pub files: Vec<String>,
-    pub selected: u16,
+    pub selected: Arc<AtomicU32>,
 }
 
 pub struct File {
@@ -50,7 +54,7 @@ fn get_files(path: PathBuf) -> Vec<String> {
 }
 
 impl FileList {
-    pub fn new(path: PathBuf) -> FileList {
+    pub fn new(path: PathBuf, selected: Arc<AtomicU32>) -> FileList {
         let files = get_files(path.clone());
         Self {
             path: path.clone(),
@@ -58,8 +62,15 @@ impl FileList {
             rainbow: false,
             tick: 1,
             files,
-            selected: 0,
+            selected,
         }
+    }
+    pub fn get_file_from_index(&self, index: u32) -> Option<&String> {
+        let index = index as usize % self.files.len();
+        self.files.get(index as usize)
+    }
+    pub fn get_path(&self) -> PathBuf {
+        self.path.clone()
     }
 }
 
@@ -85,20 +96,22 @@ impl Widget for FileList {
             let y = (abs_y + padding) + i as u16;
 
             // set up highlight colors
-            let (default_fg, bg) = if i == self.selected as usize {
-                (Color::Black, Some(Color::White))
-            } else {
-                (Color::White, None)
-            };
+            let (default_fg, bg) =
+                if i == self.selected.load(Ordering::Relaxed) as usize % self.files.len() {
+                    (Color::Black, Some(Color::White))
+                } else {
+                    (Color::White, None)
+                };
 
             if self.rainbow {
                 for (j, ch) in line.chars().enumerate() {
                     let x = x_start + j as u16;
-                    let fg = if i == self.selected as usize {
-                        Color::Black // override
-                    } else {
-                        rainbow_color(j + self.tick)
-                    };
+                    let fg =
+                        if i == self.selected.load(Ordering::Relaxed) as usize % self.files.len() {
+                            Color::Black // override
+                        } else {
+                            rainbow_color(j + self.tick)
+                        };
                     buf.push_str(&format!(
                         "{}{}{}{}{}",
                         cursor::MoveTo(x, y),

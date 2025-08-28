@@ -37,3 +37,13 @@ pub enum WidgetKind {
     //ScrollPanel(ScrollPanel),
     //Image(ImageWidget)
 }
+
+impl WidgetKind {
+    pub fn as_file_list(&self) -> Option<&FileList> {
+        if let WidgetKind::FileList(file_list) = self {
+            Some(file_list)
+        } else {
+            None
+        }
+    }
+}
