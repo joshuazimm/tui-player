@@ -1,11 +1,8 @@
 // TODO: Since this will be a commonly repeated filetype
 //       consider making autogen or at least templating
 //       common parts of the code
-use crate::widget::{Rect, Widget};
-use crossterm::{
-    cursor,
-    style::{Color, ResetColor, SetForegroundColor},
-};
+use crossterm::style::Color;
+use crate::widget::{Rect, Widget, Cell};
 
 #[derive(Debug, Clone)]
 pub struct Label {
@@ -31,36 +28,31 @@ impl Widget for Label {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    fn render(&self, area: &Rect, buf: &mut String) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute();
-
+    fn render(&self, area: &Rect, buf: &mut [Vec<Cell>], term_width: u16, term_height: u16) -> std::io::Result<()> {
+        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute(term_width, term_height);
         let x_start = if self.align_center {
-            abs_x + (abs_width.saturating_sub(self.text.len() as u16) / 2)
+            abs_x as usize + (abs_width as usize).saturating_sub(self.text.len()) / 2
         } else {
-            abs_x
+            abs_x as usize
         };
-        let y = abs_y + (abs_height / 2);
+        let y = abs_y as usize + abs_height as usize / 2;
 
         if self.rainbow {
             for (i, ch) in self.text.chars().enumerate() {
-                let x = x_start + i as u16;
-                let color = rainbow_color(i + self.tick);
-                buf.push_str(&format!(
-                    "{}{}{}{}",
-                    cursor::MoveTo(x, y),
-                    SetForegroundColor(color),
-                    ch,
-                    ResetColor
-                ));
+                let x = x_start + i;
+                if y < buf.len() && x < buf[0].len() {
+                    buf[y][x].ch = ch;
+                    buf[y][x].fg = Some(rainbow_color(i + self.tick));
+                }
             }
         } else {
-            buf.push_str(&format!(
-                "{}{}{}{}",
-                cursor::MoveTo(x_start, y),
-                SetForegroundColor(Color::White),
-                self.text,
-                ResetColor
-            ));
+            for (i, ch) in self.text.chars().enumerate() {
+                let x = x_start + i;
+                if y < buf.len() && x < buf[0].len() {
+                    buf[y][x].ch = ch;
+                    buf[y][x].fg = Some(Color::White);
+                }
+            }
         }
 
         Ok(())

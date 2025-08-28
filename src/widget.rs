@@ -1,8 +1,37 @@
-use std::io::Write;
+use std::io::{Write};
 
-use crate::widgets::WidgetKind;
-use crossterm::{cursor, terminal::size};
 use enum_dispatch::enum_dispatch;
+use crate::widgets::WidgetKind;
+use crossterm::{terminal::size, cursor::MoveTo, style::{SetForegroundColor, SetBackgroundColor, ResetColor, Color}};
+
+#[derive(Clone, Copy)]
+pub struct Cell {
+    pub ch: char,
+    pub fg: Option<Color>,
+    pub bg: Option<Color>
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self { ch: ' ', fg: None, bg: None }
+    }
+}
+
+fn make_screen_buffer(width: u16, height: u16) -> Vec<Vec<Cell>> {
+    vec![vec![Cell::default(); width as usize]; height as usize]
+}
+
+fn draw_horizontal(buf: &mut [Vec<Cell>], y: usize, x_start: usize, x_end: usize, ch: char) {
+    for x in x_start..x_end {
+        buf[y][x].ch = ch;
+    }
+}
+
+fn draw_vertical(buf: &mut [Vec<Cell>], x: usize, y_start: usize, y_end: usize, ch: char) {
+    for y in y_start..y_end {
+        buf[y][x].ch = ch;
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Rect {
@@ -13,8 +42,7 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub fn to_absolute(&self) -> (u16, u16, u16, u16) {
-        let (term_width, term_height) = size().unwrap_or((80, 24));
+    pub fn to_absolute(&self, term_width: u16, term_height: u16) -> (u16, u16, u16, u16) {
         let x = (self.x * term_width as f32) as u16;
         let y = (self.y * term_height as f32) as u16;
         let width = (self.width * term_width as f32) as u16;
@@ -25,9 +53,8 @@ impl Rect {
 
 pub struct Section {
     pub rect: Rect,
-    pub last_absolute_size: Option<(u16, u16, u16, u16)>,
     pub border: bool,
-    pub widget: WidgetKind,
+    pub widget: WidgetKind
 }
 
 impl Section {
@@ -35,48 +62,15 @@ impl Section {
         Self {
             rect,
             border,
-            widget,
-            last_absolute_size: None,
+            widget
         }
-    }
-
-    pub fn clear_area(&self, buf: &mut String) -> (u16, u16, u16, u16) {
-        let current_abs = self.rect.to_absolute();
-
-        // Get the area to clear (max of current and last size)
-        let (clear_x, clear_y, clear_width, clear_height) =
-            if let Some(last_abs) = self.last_absolute_size {
-                let (curr_x, curr_y, curr_w, curr_h) = current_abs;
-                let (last_x, last_y, last_w, last_h) = last_abs;
-
-                let min_x = curr_x.min(last_x);
-                let min_y = curr_y.min(last_y);
-                let max_right = (curr_x + curr_w).max(last_x + last_w);
-                let max_bottom = (curr_y + curr_h).max(last_y + last_h);
-
-                (min_x, min_y, max_right - min_x, max_bottom - min_y)
-            } else {
-                // First render, just use current size
-                current_abs
-            };
-
-        // Clear the calculated area
-        for dy in 0..clear_height {
-            buf.push_str(&format!(
-                "{}{}",
-                cursor::MoveTo(clear_x, clear_y + dy),
-                " ".repeat(clear_width as usize)
-            ));
-        }
-
-        current_abs
     }
 }
 
 #[enum_dispatch]
 pub trait Widget {
     fn update(&mut self);
-    fn render(&self, area: &Rect, buf: &mut String) -> std::io::Result<()>;
+    fn render(&self, area: &Rect, buf: &mut [Vec<Cell>], term_width: u16, term_height: u16) -> std::io::Result<()>;
 }
 
 pub struct Layout {
@@ -92,44 +86,73 @@ impl Layout {
     }
 
     pub fn render_all(&mut self, out: &mut std::io::Stdout) -> std::io::Result<()> {
-        let mut buf = String::new();
-        for section in &mut self.sections {
-            section.last_absolute_size = Some(section.clear_area(&mut buf));
+        // Use one terminal size per render call
+        let (term_w, term_h) = size().unwrap();
+        let mut screen = make_screen_buffer(term_w, term_h);
+
+        for section in &self.sections {
             if section.border {
-                let _ = Self::draw_border(&section.rect, &mut buf);
+                Self::draw_border(&mut screen, &section.rect, term_w, term_h);
             }
-            section.widget.render(&section.rect, &mut buf)?;
         }
-        write!(out, "{}", buf)?;
+
+        for section in &mut self.sections {
+            section.widget.render(&section.rect, &mut screen, term_w, term_h)?;
+        }
+
+        Self::flush_buffer(out, &screen)
+    }
+
+    fn draw_border(buf: &mut [Vec<Cell>], rect: &crate::widget::Rect, term_width: u16, term_height: u16) {
+        let (abs_x, abs_y, abs_w, abs_h) = rect.to_absolute(term_width, term_height);
+
+        if abs_w < 2 || abs_h < 2 { return; }
+
+        let left = abs_x as usize;
+        let right = (abs_x + abs_w - 1) as usize;
+        let top = abs_y as usize;
+        let bottom = (abs_y + abs_h - 1) as usize;
+
+        // Corners
+        buf[top][left].ch = '┌';
+        buf[top][right].ch = '┐';
+        buf[bottom][left].ch = '└';
+        buf[bottom][right].ch = '┘';
+
+        // Horizontal edges
+        draw_horizontal(buf, top, left + 1, right, '─');
+        draw_horizontal(buf, bottom, left + 1, right, '─');
+
+        // Vertical edges
+        draw_vertical(buf, left, top + 1, bottom, '│');
+        draw_vertical(buf, right, top + 1, bottom, '│');
+    }
+
+    // Construct a Chronological Screen string to optimize speed
+    fn flush_buffer(out: &mut std::io::Stdout, buf: &[Vec<Cell>]) -> std::io::Result<()> {
+        let mut output = String::new();
+
+        for (row_idx, row) in buf.iter().enumerate() {
+            output.push_str(&format!("{}", MoveTo(0, row_idx as u16)));
+
+            for cell in row {
+                if let Some(fg) = cell.fg {
+                    output.push_str(&format!("{}", SetForegroundColor(fg)));
+                }
+                if let Some(bg) = cell.bg {
+                    output.push_str(&format!("{}", SetBackgroundColor(bg)));
+                }
+
+                output.push(cell.ch);
+
+                if cell.fg.is_some() || cell.bg.is_some() {
+                    output.push_str(&format!("{}", ResetColor));
+                }
+            }
+        }
+
+        write!(out, "{}", output)?;
         out.flush()
     }
 
-    fn draw_border(rect: &Rect, buf: &mut String) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = rect.to_absolute();
-
-        let top = abs_y;
-        let bottom = abs_y + abs_height.saturating_sub(1);
-        let left = abs_x;
-        let right = abs_x + abs_width.saturating_sub(1);
-
-        // Corners
-        buf.push_str(&format!("{}┌", cursor::MoveTo(left, top)));
-        buf.push_str(&format!("{}┐", cursor::MoveTo(right, top)));
-        buf.push_str(&format!("{}└", cursor::MoveTo(left, bottom)));
-        buf.push_str(&format!("{}┘", cursor::MoveTo(right, bottom)));
-
-        // Horizontal lines
-        for dx in 1..abs_width.saturating_sub(1) {
-            buf.push_str(&format!("{}─", cursor::MoveTo(left + dx, top)));
-            buf.push_str(&format!("{}─", cursor::MoveTo(left + dx, bottom)));
-        }
-
-        // Vertical lines
-        for dy in 1..abs_height.saturating_sub(1) {
-            buf.push_str(&format!("{}│", cursor::MoveTo(left, top + dy)));
-            buf.push_str(&format!("{}│", cursor::MoveTo(right, top + dy)));
-        }
-
-        Ok(())
-    }
 }

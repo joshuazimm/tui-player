@@ -21,7 +21,7 @@ use widgets::{Controls, FileList, Label, WidgetKind};
 mod keyhandler;
 use keyhandler::KeyHandler;
 mod decoder;
-use decoder::{AudioDecoder, decoder_from_path};
+use decoder::{decoder_from_path};
 
 // external includes
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -120,7 +120,7 @@ fn audio_thread(
     let channels = decoder.channels();
     let file_rate = decoder.sample_rate();
 
-    let mut resampler = SimpleResampler::new(
+    let resampler = SimpleResampler::new(
         ResamplerKind::Fast,
         file_rate,
         device_rate,
@@ -218,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rb = HeapRb::<f32>::new(device_rate * 2);
     let (prod, mut cons): (HeapProd<f32>, HeapCons<f32>) = rb.split();
 
-    let file_list = FileList::new(PathBuf::from("test-tracks"), Arc::clone(&select_index));
+    let file_list = FileList::new(PathBuf::from("test-tracks/Woodland"), Arc::clone(&select_index));
 
     // Define view layout
     // TODO: Move to separate config file & add xml parsing
@@ -229,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     x: 0.0,
                     y: 0.0,
                     width: 0.5,
-                    height: 0.2,
+                    height: 0.3,
                 },
                 true,
                 WidgetKind::Label(Label {
@@ -239,23 +239,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tick: 0,
                 }),
             ),
-            /*
             Section::new(
                 Rect {
-                    x: 0.5,
-                    y: 0.0,
+                    x: 0.0,
+                    y: 0.3,
                     width: 0.5,
-                    height: 0.2,
+                    height: 0.7,
                 },
                 true,
                 WidgetKind::Controls(Controls::new(Arc::clone(&is_paused), Arc::clone(&volume))),
-            ),*/
+            ),
             Section::new(
                 Rect {
                     x: 0.5,
                     y: 0.0,
                     width: 0.5,
-                    height: 0.2,
+                    height: 1.0,
                 },
                 true,
                 WidgetKind::FileList(file_list),
@@ -318,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let new_track = enter_pressed.load(Ordering::Relaxed);
         if new_track {
             let index = select_index.load(Ordering::Relaxed);
-            if let Some(file_list) = layout.sections[1].widget.as_file_list() {
+            if let Some(file_list) = layout.sections.iter().find_map(|section| section.widget.as_file_list()) {
                 if let Some(path_str) = file_list.get_file_from_index(index) {
                     let mut path = file_list.get_path();
                     path.push(path_str);

@@ -4,8 +4,8 @@ use lewton::VorbisError;
 use lewton::inside_ogg::OggStreamReader;
 use minimp3::Decoder as Minimp3Decoder;
 use minimp3::{Error, Frame};
-use ogg::{Packet, reading::PacketReader};
-use opus::{Application, Channels, Decoder as OpusDecoder};
+use ogg::reading::PacketReader;
+use opus::{Channels, Decoder as OpusDecoder};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
@@ -92,32 +92,27 @@ impl FlacTrack {
 }
 // Placeholder structs for other formats
 pub struct Mp3Track {
-    // TODO: implement MP3 decoder
     reader: Minimp3Decoder<File>,
     current_frame: Option<Frame>,
     sample_index: usize,
     sample_rate: u32,
-    channels: u32,
-    bits_per_sample: u32,
-    chunk_size: u32,
+    channels: u32
 }
 
 impl Mp3Track {
     pub fn new(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut reader = Minimp3Decoder::new(File::open(path).unwrap());
-        let chunk_size = 1152;
+        let _chunk_size = 1152;
         let current_frame = reader.next_frame().unwrap();
         let sample_rate = current_frame.sample_rate as u32;
         let channels = current_frame.channels as u32;
-        let bits_per_sample = current_frame.bitrate as u32;
+        let _bits_per_sample = current_frame.bitrate as u32;
         Ok(Mp3Track {
             reader,
             current_frame: Some(current_frame),
             sample_index: 0,
-            chunk_size,
             sample_rate,
-            channels,
-            bits_per_sample,
+            channels
         })
     }
 
@@ -160,7 +155,6 @@ pub struct VorbisTrack {
     reader: OggStreamReader<BufReader<File>>,
     sample_rate: u32,
     channels: u32,
-    bits_per_sample: u32,
     buffer: VecDeque<f32>,
     finished: bool,
 }
@@ -171,15 +165,14 @@ impl VorbisTrack {
         let header = &reader.ident_hdr;
         let sample_rate = header.audio_sample_rate;
         let channels = header.audio_channels as u32;
-        let bits_per_sample = 16; // Vorbis decoded samples are i16
+        let _bits_per_sample = 16; // Vorbis decoded samples are i16
 
         Ok(VorbisTrack {
             reader,
             sample_rate,
             channels,
-            bits_per_sample,
             buffer: VecDeque::new(),
-            finished: false,
+            finished: false
         })
     }
 
@@ -238,7 +231,6 @@ pub struct OpusTrack {
     finished: bool,
     sample_rate: u32,
     channels: u32,
-    bits_per_sample: u32,
     // Opus-specific
     pre_skip: u16,
     samples_decoded: u64,
@@ -258,10 +250,10 @@ impl OpusTrack {
         }
 
         // Parse Opus identification header
-        let version = ident_packet.data[8];
+        let _version = ident_packet.data[8];
         let channels = ident_packet.data[9];
         let pre_skip = u16::from_le_bytes([ident_packet.data[10], ident_packet.data[11]]);
-        let original_sample_rate = u32::from_le_bytes([
+        let _original_sample_rate = u32::from_le_bytes([
             ident_packet.data[12],
             ident_packet.data[13],
             ident_packet.data[14],
@@ -287,7 +279,6 @@ impl OpusTrack {
             finished: false,
             sample_rate: 48000, // Opus internal rate
             channels: channels as u32,
-            bits_per_sample: 16, // Opus typically outputs 16-bit equivalent
             pre_skip,
             samples_decoded: 0,
         })
@@ -356,7 +347,8 @@ impl OpusTrack {
 pub enum AudioDecoder {
     Flac(FlacTrack),
     Mp3(Mp3Track),
-    Ogg(VorbisTrack),
+    Opus(OpusTrack),
+    Vorbis(VorbisTrack),
 }
 
 impl AudioDecoder {
@@ -364,7 +356,8 @@ impl AudioDecoder {
         match self {
             AudioDecoder::Flac(track) => track.sample_rate as usize,
             AudioDecoder::Mp3(track) => track.sample_rate as usize,
-            AudioDecoder::Ogg(track) => track.sample_rate as usize,
+            AudioDecoder::Vorbis(track) => track.sample_rate as usize,
+            AudioDecoder::Opus(track) => track.sample_rate as usize,
         }
     }
 
@@ -372,23 +365,26 @@ impl AudioDecoder {
         match self {
             AudioDecoder::Flac(track) => track.channels as usize,
             AudioDecoder::Mp3(track) => track.channels as usize,
-            AudioDecoder::Ogg(track) => track.channels as usize,
+            AudioDecoder::Vorbis(track) => track.channels as usize,
+            AudioDecoder::Opus(track) => track.channels as usize,
         }
     }
 
-    pub fn bits(&self) -> u32 {
-        match self {
-            AudioDecoder::Flac(track) => track.bits_per_sample,
-            AudioDecoder::Mp3(track) => track.bits_per_sample,
-            AudioDecoder::Ogg(track) => track.bits_per_sample,
-        }
-    }
+    // pub fn bits(&self) -> u32 {
+    //     match self {
+    //         AudioDecoder::Flac(track) => track.bits_per_sample,
+    //         AudioDecoder::Mp3(track) => track.bits_per_sample,
+    //         AudioDecoder::Vorbis(track) => track.bits_per_sample,
+    //         AudioDecoder::Opus(track) => track.bits_per_sample,
+    //     }
+    // }
 
     pub fn next_sample(&mut self) -> Option<f32> {
         match self {
             AudioDecoder::Flac(track) => track.next_sample(),
             AudioDecoder::Mp3(track) => track.next_sample(),
-            AudioDecoder::Ogg(track) => track.next_sample(),
+            AudioDecoder::Vorbis(track) => track.next_sample(),
+            AudioDecoder::Opus(track) => track.next_sample(),
         }
     }
 }
@@ -412,8 +408,13 @@ pub fn decoder_from_path(
             Ok(AudioDecoder::Mp3(Mp3Track::new(path_str)?))
         }
         "ogg" => {
+            //TODO decide if we want to include opus contained in ogg
             let path_str = path.to_str().ok_or("Invalid path")?;
-            Ok(AudioDecoder::Ogg(VorbisTrack::new(path_str)?))
+            Ok(AudioDecoder::Vorbis(VorbisTrack::new(path_str)?))
+        }
+        "opus" => {
+            let path_str = path.to_str().ok_or("Invalid path")?;
+            Ok(AudioDecoder::Opus(OpusTrack::new(path_str)?))
         }
         _ => Err("Unsupported audio format".into()),
     }

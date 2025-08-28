@@ -34,6 +34,7 @@ fn calculate_optimal_sinc_len(output_rate: usize, channels: usize, base_len: usi
 }
 
 // This Enum allows common handling of different resampler types
+#[allow(dead_code)]
 pub enum ResamplerKind {
     Fast, // Polynomial interpolation, fastest but lower quality
     Fft,  // Fast Fourier Transform based, good quality and speed balance

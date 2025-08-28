@@ -1,6 +1,7 @@
-use crate::widget::{Rect, Widget};
+use crate::widget::{Rect, Widget, Cell};
 use std::sync::{Arc, atomic::{AtomicU32, Ordering, AtomicBool}};
-use crossterm::{style::{SetForegroundColor, ResetColor, Color}, cursor};
+use crossterm::style::Color;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct Controls {
@@ -31,20 +32,20 @@ impl Widget for Controls {
         );
     }
 
-    fn render(&self, area: &Rect, buf: &mut String) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute();
-        
-        let y = abs_y + (abs_height / 2);
-        let x = abs_x + (abs_width.saturating_sub(self.cached_text.len() as u16) / 2);
-        
-        buf.push_str(&format!(
-            "{}{}{}{}",
-            cursor::MoveTo(x, y),
-            SetForegroundColor(Color::Cyan),
-            self.cached_text,
-            ResetColor
-        ));
-        
+    fn render(&self, area: &Rect, buf: &mut [Vec<Cell>], term_width: u16, term_height: u16) -> std::io::Result<()> {
+        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute(term_width, term_height);
+        let y = abs_y as usize + (abs_height as usize / 2);
+
+        let text_width = UnicodeWidthStr::width(self.cached_text.as_str());
+        let x = abs_x as usize + (abs_width as usize).saturating_sub(text_width) / 2;
+
+        for (i, ch) in self.cached_text.chars().enumerate() {
+            if y < buf.len() && x + i < buf[0].len() {
+                buf[y][x + i].ch = ch;
+                buf[y][x + i].fg = Some(Color::Cyan);
+            }
+        }
+
         Ok(())
     }
 }

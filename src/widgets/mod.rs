@@ -16,7 +16,7 @@ pub mod label;
 //pub mod scroll_panel;
 //pub mod image;
 
-use crate::widget::{Rect, Widget};
+use crate::widget::{Rect, Widget, Cell};
 use enum_dispatch::enum_dispatch;
 
 pub use controls::Controls;
