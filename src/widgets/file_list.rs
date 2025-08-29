@@ -10,7 +10,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-static padding: u16 = 1;
+static PADDING: u16 = 1;
 
 #[derive(Debug, Clone)]
 pub struct FileList {
@@ -84,16 +84,16 @@ impl Widget for FileList {
 
         // Only render as many lines as fit in the area
         for (i, line) in self.files.iter().enumerate() {
-            if i as u16 > abs_height - padding {
+            if i as u16 > abs_height - PADDING {
                 break;
             }
 
             let x_start = if self.align_center {
                 abs_x + (abs_width.saturating_sub(line.len() as u16) / 2)
             } else {
-                abs_x + padding
+                abs_x + PADDING
             };
-            let y = (abs_y + padding) + i as u16;
+            let y = (abs_y + PADDING) + i as u16;
 
             // set up highlight colors
             let (default_fg, bg) =

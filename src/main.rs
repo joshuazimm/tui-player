@@ -1,30 +1,27 @@
 // std includes
-use std::fs::File;
-use std::io::{BufReader, stdout};
-use std::path::{Path, PathBuf};
+use std::io::stdout;
+use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, Ordering},
-    mpsc::{Receiver, TryRecvError},
+    mpsc::Receiver,
 };
 use std::thread;
 use std::time::Duration;
 
 // internal includes
 mod resampler;
-use resampler::{ResamplerKind, SimpleResampler, pcm_to_f32};
+use resampler::{ResamplerKind, SimpleResampler};
 mod widget;
 use widget::{Layout, Rect, Section};
 mod widgets;
 use widgets::{Controls, FileList, Label, WidgetKind};
 mod keyhandler;
 use keyhandler::KeyHandler;
+mod decoder;
+use decoder::{AudioDecoder, decoder_from_path};
 
 // external includes
-// TODO: Find Filesystem crate for cross platform path handling
-// ^^ I think std::fs and std::path should work for this. Is there some functionality you wanted
-// these wouldn't provide?
-use claxon::FlacReader;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
     cursor::{Hide, Show},
@@ -33,9 +30,6 @@ use crossterm::{
 };
 // use lewton::inside_ogg::OggStreamReader;
 // TODO: use above include for Vorbis support
-use minimp3::Decoder as Minimp3Decoder;
-use ogg::reading::PacketReader;
-use opus::{Channels, Decoder as OpusDecoder};
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Producer, Split},
@@ -88,252 +82,99 @@ fn process_audio_chunks<F>(
     }
 }
 
-/*fn play_audio_file(
-    path: &Path,
+fn audio_thread(
+    initial_path: PathBuf,
     mut prod: ringbuf::HeapProd<f32>,
     device_rate: usize,
     track_rx: Receiver<PathBuf>,
 ) {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let chunk_size = 4096;
+    let sub_chunks = 1;
 
-    match ext.as_str() {
-        "flac" => {
-            let mut reader = FlacReader::open(path).unwrap();
-            let file_rate = reader.streaminfo().sample_rate as usize;
-            let bits = reader.streaminfo().bits_per_sample;
-            let channels = reader.streaminfo().channels as usize;
-            let chunk_size = 4096;
-            let sub_chunks = 1;
+    let mut current_path = initial_path;
 
-            let resampler = SimpleResampler::new(
-                ResamplerKind::Fast,
-                file_rate,
-                device_rate,
-                chunk_size,
-                sub_chunks,
-                channels,
-            )
-            .unwrap();
-
-            let mut sample_iter = reader.samples();
-
-            process_audio_chunks(
-                resampler,
-                channels,
-                chunk_size,
-                |buffers| {
-                    let mut frames_collected = 0;
-                    let mut eof = false;
-
-                    while frames_collected < chunk_size {
-                        for ch in 0..channels {
-                            match sample_iter.next() {
-                                Some(Ok(sample)) => {
-                                    buffers[ch].push(pcm_to_f32(sample, bits, true));
-                                }
-                                Some(Err(_)) => continue,
-                                None => {
-                                    eof = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if eof {
-                            break;
-                        }
-
-                        match track_rx.try_recv() {
-                            Ok(new_path) => {}
-                            Err(TryRecvError::Empty) => {}
-                            Err(TryRecvError::Disconnected) => break, // Channel closed, stop thread
-                        }
-
-                        frames_collected += 1;
-                    }
-
-                    (frames_collected, eof)
-                },
-                &mut prod,
-            );
+    let mut decoder = match decoder_from_path(&current_path) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            eprintln!("Failed to create decoder for {:?}: {}", current_path, e);
+            return; // or handle error appropriately
         }
+    };
+    let channels = decoder.channels();
+    let file_rate = decoder.sample_rate();
+    //let mut iter = decoder.get_reader().samples();
 
-        "mp3" => {
-            let mut decoder = Minimp3Decoder::new(File::open(path).unwrap());
-            let chunk_size = 1152;
-            let first_frame = decoder.next_frame().unwrap();
-            let file_rate = first_frame.sample_rate as usize;
-            let channels = first_frame.channels;
-            let sub_chunks = 1;
+    let mut resampler = SimpleResampler::new(
+        ResamplerKind::Fast,
+        file_rate,
+        device_rate,
+        chunk_size,
+        sub_chunks,
+        channels,
+    )
+    .unwrap();
 
-            let resampler = SimpleResampler::new(
-                ResamplerKind::Sinc,
-                file_rate,
-                device_rate,
-                chunk_size,
-                sub_chunks,
-                channels,
-            )
-            .unwrap();
-
-            let mut frame_iter = std::iter::once(Ok(first_frame))
-                .chain(std::iter::from_fn(|| Some(decoder.next_frame())));
-
-            process_audio_chunks(
-                resampler,
-                channels,
-                chunk_size,
-                |buffers| {
-                    let mut frames_collected = 0;
-                    let mut eof = false;
-
-                    while frames_collected < chunk_size {
-                        if let Some(Ok(frame)) = frame_iter.next() {
-                            for (i, sample) in frame.data.iter().enumerate() {
-                                buffers[i % channels].push(*sample as f32 / 32768.0);
-                            }
-                            frames_collected += frame.data.len() / channels;
-                        } else {
-                            eof = true;
-                            break;
-                        }
-                    }
-
-                    (frames_collected, eof)
-                },
-                &mut prod,
-            );
-        }
-
-        "ogg" => {
-            let file_rate = 48000; // Opus always decodes to 48kHz
-            let channels = 2; // TODO: Get actual channel count from Opus Header
-            let chunk_size = 960;
-            let sub_chunks = 1;
-
-            let resampler = SimpleResampler::new(
-                ResamplerKind::Fft,
-                file_rate,
-                device_rate,
-                chunk_size,
-                sub_chunks,
-                channels,
-            )
-            .unwrap();
-
-            // Open file handle for packet reading
-            let file_for_packets = BufReader::new(File::open(path).unwrap());
-            let mut decoder = OpusDecoder::new(
-                file_rate as u32,
-                if channels == 1 {
-                    Channels::Mono
-                } else {
-                    Channels::Stereo
-                },
-            )
-            .unwrap();
-            let mut packet_reader = PacketReader::new(file_for_packets);
-
-            process_audio_chunks(
-                resampler,
-                channels,
-                chunk_size,
-                |buffers| {
-                    let mut frames_collected = 0;
-                    let mut eof = false;
-
-                    while frames_collected < chunk_size {
-                        if let Some(packet) = packet_reader.read_packet().ok().flatten() {
-                            let mut pcm_tmp = vec![0i16; chunk_size * channels];
-                            if let Ok(samples_decoded) =
-                                decoder.decode(&packet.data, &mut pcm_tmp, false)
-                            {
-                                for frame in pcm_tmp[..samples_decoded * channels].chunks(channels)
-                                {
-                                    for ch in 0..channels {
-                                        buffers[ch].push(frame[ch] as f32 / 32768.0);
-                                    }
-                                    frames_collected += 1;
-                                    if frames_collected >= chunk_size {
-                                        break;
-                                    }
-                                }
-                            }
-                        } else {
-                            eof = true;
-                            break;
-                        }
-                    }
-
-                    (frames_collected, eof)
-                },
-                &mut prod,
-            );
-        }
-
-        _ => panic!("Unsupported file type"),
-    }
-}*/
-fn audio_thread(
-    initial_track: PathBuf,
-    mut prod: HeapProd<f32>,
-    device_rate: usize,
-    track_rx: Receiver<PathBuf>,
-) {
-    let mut current_track = initial_track;
+    let mut buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
+    let mut out_buf = resampler.output_buffer_allocate(true);
 
     loop {
-        // Load reader fresh for the current track
-        let mut reader = FlacReader::open(&current_track).unwrap();
-        let file_rate = reader.streaminfo().sample_rate as usize;
-        let channels = reader.streaminfo().channels as usize;
-        let bits = reader.streaminfo().bits_per_sample;
+        // Clear buffers for new chunk
+        for ch in 0..channels {
+            buffers[ch].truncate(0);
+        }
 
-        let chunk_size = 4096;
-        let sub_chunks = 1;
-        let mut resampler = SimpleResampler::new(
-            ResamplerKind::Fast,
-            file_rate,
-            device_rate,
-            chunk_size,
-            sub_chunks,
-            channels,
-        )
-        .unwrap();
+        let mut frames_collected = 0;
+        let mut eof = false;
 
-        let mut sample_iter = reader.samples();
-
-        // Process track until EOF or new track arrives
-        'track_loop: loop {
-            let mut buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
-
-            for frame in 0..chunk_size {
-                for ch in 0..channels {
-                    match sample_iter.next() {
-                        Some(Ok(sample)) => buffers[ch].push(pcm_to_f32(sample, bits, true)),
-                        Some(Err(_)) => continue,
-                        None => break 'track_loop, // EOF
+        while frames_collected < chunk_size {
+            for ch in 0..channels {
+                match decoder.next_sample() {
+                    Some(sample) => buffers[ch].push(sample),
+                    None => {
+                        eof = true;
+                        break;
                     }
                 }
-
-                // Check for new track
-                if let Ok(new_track) = track_rx.try_recv() {
-                    current_track = new_track;
-                    break 'track_loop; // break inner loop to restart track
-                }
             }
+            if eof {
+                break;
+            }
+            frames_collected += 1;
 
-            // Resample & push to prod
+            // Check for track change
+            if let Ok(new_path) = track_rx.try_recv() {
+                current_path = new_path;
+                decoder = match decoder_from_path(&current_path) {
+                    Ok(decoder) => decoder,
+                    Err(e) => {
+                        eprintln!("Failed to create decoder for {:?}: {}", current_path, e);
+                        return; // or handle error appropriately
+                    }
+                };
+                break; // restart loop with new decoder
+            }
+        }
+
+        // Resample and push
+        if frames_collected > 0 {
             let input_refs: Vec<&[f32]> = buffers.iter().map(|b| b.as_slice()).collect();
-            let mut out_buf = resampler.output_buffer_allocate(true);
-            resampler
-                .process_into_buffer(&input_refs, &mut out_buf, None)
-                .unwrap();
-            interleave_and_push(&out_buf, chunk_size, &mut prod);
+            let (_in_used, out_written) = if frames_collected < chunk_size {
+                resampler
+                    .process_partial_into_buffer(&input_refs, &mut out_buf, None)
+                    .unwrap()
+            } else {
+                resampler
+                    .process_into_buffer(&input_refs, &mut out_buf, None)
+                    .unwrap()
+            };
+            let output_vecs: Vec<Vec<f32>> = (0..channels)
+                .map(|ch| out_buf[ch][..out_written].to_vec())
+                .collect();
+            interleave_and_push(&output_vecs, out_written, &mut prod);
+        }
+
+        if eof {
+            break; // end of file
         }
     }
 }
@@ -489,7 +330,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     path.push(path_str);
                     let _ = track_tx.send(path);
                     enter_pressed.store(false, Ordering::Relaxed);
-                    println!("enter_pressed");
                 }
             }
         }
