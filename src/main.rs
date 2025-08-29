@@ -28,8 +28,6 @@ use crossterm::{
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-// use lewton::inside_ogg::OggStreamReader;
-// TODO: use above include for Vorbis support
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Producer, Split},
