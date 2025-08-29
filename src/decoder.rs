@@ -1,71 +1,154 @@
-use crate::resampler::pcm_to_f32;
-use claxon::input::BufferedReader;
-use claxon::{FlacReader, FlacSamples};
-use minimp3::Decoder as Minimp3Decoder;
-use ogg::reading::PacketReader;
-use opus::{Channels, Decoder as OpusDecoder};
+use claxon::FlacReader;
+use std::collections::VecDeque;
 use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 
-pub trait TrackDecoder {
-    fn sample_rate(&self) -> usize;
-    fn channels(&self) -> usize;
-    fn get_reader(&mut self) -> &FlacReader<File>; // normalized f32
-    fn bits(&self) -> u32;
-}
+use crate::resampler::pcm_to_f32;
 
 pub struct FlacTrack {
-    reader: FlacReader<File>,
-    bits: u32,
-    channels: usize,
-    rate: u32,
-    count: u32,
+    reader: FlacReader<std::io::BufReader<std::fs::File>>,
+    buffer: std::collections::VecDeque<f32>,
+    scratch: Vec<i32>, // reuse decoded frame buffer
+    finished: bool,
+    sample_rate: u32,
+    channels: u32,
+    bits_per_sample: u32,
 }
 
 impl FlacTrack {
-    fn new(path: &Path) -> Self {
-        let mut reader = FlacReader::open(path).unwrap();
-        let bits = reader.streaminfo().bits_per_sample;
-        let channels = reader.streaminfo().channels as usize;
-        let rate = reader.streaminfo().sample_rate;
-        let count = 0;
-        Self {
+    pub fn new(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let file = std::fs::File::open(path)?;
+        let reader = FlacReader::new(std::io::BufReader::new(file))?;
+        let si = reader.streaminfo();
+        Ok(FlacTrack {
             reader,
-            rate,
-            bits,
-            channels,
-            count,
+            buffer: VecDeque::new(),
+            scratch: Vec::new(),
+            finished: false,
+            sample_rate: si.sample_rate,
+            channels: si.channels,
+            bits_per_sample: si.bits_per_sample,
+        })
+    }
+
+    fn fill_buffer(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        // Decode one or more **whole** frames; never drop mid-block.
+        let mut fr = self.reader.blocks();
+        match fr.read_next_or_eof(std::mem::take(&mut self.scratch)) {
+            Ok(Some(block)) => {
+                // Interleave correctly.
+                let ch = block.channels() as usize;
+                let n = block.duration() as usize; // samples per channel
+
+                if ch == 2 {
+                    for (l, r) in block.stereo_samples() {
+                        self.buffer
+                            .push_back(pcm_to_f32(l, self.bits_per_sample, true));
+                        self.buffer
+                            .push_back(pcm_to_f32(r, self.bits_per_sample, true));
+                    }
+                } else {
+                    for i in 0..n {
+                        for c in 0..ch {
+                            let s = block.sample(c as u32, i as u32);
+                            self.buffer
+                                .push_back(pcm_to_f32(s, self.bits_per_sample, true));
+                        }
+                    }
+                }
+
+                // Reuse buffer next call.
+                self.scratch = block.into_buffer();
+            }
+            Ok(None) => {
+                self.finished = true;
+            }
+            Err(_e) => {
+                self.finished = true;
+            }
+        }
+    }
+
+    fn next_sample(&mut self) -> Option<f32> {
+        if let Some(s) = self.buffer.pop_front() {
+            return Some(s);
+        }
+        if self.finished {
+            return None;
+        }
+        self.fill_buffer();
+        self.buffer.pop_front()
+    }
+}
+// Placeholder structs for other formats
+pub struct Mp3Track {
+    // TODO: implement MP3 decoder
+    sample_rate: u32,
+    channels: u32,
+    bits_per_sample: u32,
+}
+
+pub struct OggTrack {
+    // TODO: implement OGG decoder
+    sample_rate: u32,
+    channels: u32,
+    bits_per_sample: u32,
+}
+
+pub enum AudioDecoder {
+    Flac(FlacTrack),
+    Mp3(Mp3Track),
+    Ogg(OggTrack),
+}
+
+impl AudioDecoder {
+    pub fn sample_rate(&self) -> usize {
+        match self {
+            AudioDecoder::Flac(track) => track.sample_rate as usize,
+            AudioDecoder::Mp3(track) => track.sample_rate as usize,
+            AudioDecoder::Ogg(track) => track.sample_rate as usize,
+        }
+    }
+
+    pub fn channels(&self) -> usize {
+        match self {
+            AudioDecoder::Flac(track) => track.channels as usize,
+            AudioDecoder::Mp3(track) => track.channels as usize,
+            AudioDecoder::Ogg(track) => track.channels as usize,
+        }
+    }
+
+    pub fn bits(&self) -> u32 {
+        match self {
+            AudioDecoder::Flac(track) => track.bits_per_sample,
+            AudioDecoder::Mp3(track) => track.bits_per_sample,
+            AudioDecoder::Ogg(track) => track.bits_per_sample,
+        }
+    }
+
+    pub fn next_sample(&mut self) -> Option<f32> {
+        match self {
+            AudioDecoder::Flac(track) => track.next_sample(),
+            AudioDecoder::Mp3(_track) => {
+                // TODO: implement MP3 sample reading
+                None
+            }
+            AudioDecoder::Ogg(_track) => {
+                // TODO: implement OGG sample reading
+                None
+            }
         }
     }
 }
 
-impl TrackDecoder for FlacTrack {
-    fn sample_rate(&self) -> usize {
-        self.rate as usize
-    }
-    fn channels(&self) -> usize {
-        self.channels
-    }
-    fn get_reader(&mut self) -> &FlacReader<File> {
-        &mut self.reader
-    }
-    fn bits(&self) -> u32 {
-        self.bits
-    }
-}
-
-/* Repeat similarly for OGG and MP3
-struct OggTrack {/* implement OggReader */}
-impl TrackDecoder for OggTrack {
-    /* same next_sample interface */
-}
-
-struct Mp3Track {/* implement MP3Reader */}
-impl TrackDecoder for Mp3Track {
-    /* same next_sample interface */
-}*/
-
-pub fn decoder_from_path(path: &Path) -> Box<dyn TrackDecoder + Send> {
+pub fn decoder_from_path(
+    path: &Path,
+) -> Result<AudioDecoder, Box<dyn std::error::Error + Send + Sync>> {
     match path
         .extension()
         .and_then(|e| e.to_str())
@@ -73,9 +156,19 @@ pub fn decoder_from_path(path: &Path) -> Box<dyn TrackDecoder + Send> {
         .to_lowercase()
         .as_str()
     {
-        "flac" => Box::new(FlacTrack::new(path)),
-        //"ogg" => Box::new(OggTrack::new(path)),
-        //"mp3" => Box::new(Mp3Track::new(path)),
-        _ => panic!("Unsupported audio format"),
+        "flac" => {
+            let path_str = path.to_str().ok_or("Invalid path")?;
+            Ok(AudioDecoder::Flac(FlacTrack::new(path_str)?))
+        }
+        "mp3" => {
+            // TODO: implement MP3 creation
+            Err("MP3 support not yet implemented".into())
+        }
+        "ogg" => {
+            // TODO: implement OGG creation
+            Err("OGG support not yet implemented".into())
+        }
+        _ => Err("Unsupported audio format".into()),
     }
 }
+
