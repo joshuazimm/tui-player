@@ -7,8 +7,8 @@ use std::path::Path;
 use crate::resampler::pcm_to_f32;
 
 pub struct FlacTrack {
-    reader: FlacReader<std::io::BufReader<std::fs::File>>,
-    buffer: std::collections::VecDeque<f32>,
+    reader: FlacReader<BufReader<File>>,
+    buffer: VecDeque<f32>,
     scratch: Vec<i32>, // reuse decoded frame buffer
     finished: bool,
     sample_rate: u32,
@@ -171,4 +171,3 @@ pub fn decoder_from_path(
         _ => Err("Unsupported audio format".into()),
     }
 }
-

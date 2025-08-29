@@ -1,17 +1,17 @@
 // std includes
-use std::io::{BufReader, stdout};
+use std::io::stdout;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, Ordering},
-    mpsc::{Receiver, TryRecvError},
+    mpsc::Receiver,
 };
 use std::thread;
 use std::time::Duration;
 
 // internal includes
 mod resampler;
-use resampler::{ResamplerKind, SimpleResampler, pcm_to_f32};
+use resampler::{ResamplerKind, SimpleResampler};
 mod widget;
 use widget::{Layout, Rect, Section};
 mod widgets;
