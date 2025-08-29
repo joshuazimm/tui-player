@@ -1,7 +1,6 @@
 // std includes
-use std::fs::File;
 use std::io::{BufReader, stdout};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -19,12 +18,10 @@ mod widgets;
 use widgets::{Controls, FileList, Label, WidgetKind};
 mod keyhandler;
 use keyhandler::KeyHandler;
+mod decoder;
+use decoder::{TrackDecoder, decoder_from_path};
 
 // external includes
-// TODO: Find Filesystem crate for cross platform path handling
-// ^^ I think std::fs and std::path should work for this. Is there some functionality you wanted
-// these wouldn't provide?
-use claxon::FlacReader;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
     cursor::{Hide, Show},
@@ -33,9 +30,6 @@ use crossterm::{
 };
 // use lewton::inside_ogg::OggStreamReader;
 // TODO: use above include for Vorbis support
-use minimp3::Decoder as Minimp3Decoder;
-use ogg::reading::PacketReader;
-use opus::{Channels, Decoder as OpusDecoder};
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Producer, Split},
@@ -279,61 +273,89 @@ fn process_audio_chunks<F>(
     }
 }*/
 fn audio_thread(
-    initial_track: PathBuf,
-    mut prod: HeapProd<f32>,
+    initial_path: PathBuf,
+    mut prod: ringbuf::HeapProd<f32>,
     device_rate: usize,
     track_rx: Receiver<PathBuf>,
 ) {
-    let mut current_track = initial_track;
+    let chunk_size = 4096;
+    let sub_chunks = 1;
+
+    let mut current_path = initial_path;
+    let mut decoder: Box<dyn TrackDecoder + Send> = decoder_from_path(&current_path);
+    let channels = decoder.channels();
+    let file_rate = decoder.sample_rate();
+    //let bits = decoder.bits();
+    //let mut iter = decoder.get_reader().samples();
+
+    let mut resampler = SimpleResampler::new(
+        ResamplerKind::Fast,
+        file_rate,
+        device_rate,
+        chunk_size,
+        sub_chunks,
+        channels,
+    )
+    .unwrap();
+
+    let mut buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
+    let mut out_buf = resampler.output_buffer_allocate(true);
 
     loop {
-        // Load reader fresh for the current track
-        let mut reader = FlacReader::open(&current_track).unwrap();
-        let file_rate = reader.streaminfo().sample_rate as usize;
-        let channels = reader.streaminfo().channels as usize;
-        let bits = reader.streaminfo().bits_per_sample;
+        // Clear buffers for new chunk
+        for ch in 0..channels {
+            buffers[ch].truncate(0);
+        }
 
-        let chunk_size = 4096;
-        let sub_chunks = 1;
-        let mut resampler = SimpleResampler::new(
-            ResamplerKind::Fast,
-            file_rate,
-            device_rate,
-            chunk_size,
-            sub_chunks,
-            channels,
-        )
-        .unwrap();
+        let mut frames_collected = 0;
+        let mut eof = false;
 
-        let mut sample_iter = reader.samples();
-
-        // Process track until EOF or new track arrives
-        'track_loop: loop {
-            let mut buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
-
-            for frame in 0..chunk_size {
-                for ch in 0..channels {
-                    match sample_iter.next() {
-                        Some(Ok(sample)) => buffers[ch].push(pcm_to_f32(sample, bits, true)),
-                        Some(Err(_)) => continue,
-                        None => break 'track_loop, // EOF
+        while frames_collected < chunk_size {
+            for ch in 0..channels {
+                match decoder.next_sample() {
+                    Some(Ok(sample)) => {
+                        buffers[ch].push(pcm_to_f32(sample, bits, true));
+                    }
+                    Some(Err(_)) => continue,
+                    None => {
+                        eof = true;
+                        break;
                     }
                 }
-
-                // Check for new track
-                if let Ok(new_track) = track_rx.try_recv() {
-                    current_track = new_track;
-                    break 'track_loop; // break inner loop to restart track
-                }
             }
+            if eof {
+                break;
+            }
+            frames_collected += 1;
 
-            // Resample & push to prod
+            // Check for track change
+            if let Ok(new_path) = track_rx.try_recv() {
+                current_path = new_path;
+                decoder = decoder_from_path(&current_path);
+                break; // restart loop with new decoder
+            }
+        }
+
+        // Resample and push
+        if frames_collected > 0 {
             let input_refs: Vec<&[f32]> = buffers.iter().map(|b| b.as_slice()).collect();
-            let mut out_buf = resampler.output_buffer_allocate(true);
-            resampler
-                .process_into_buffer(&input_refs, &mut out_buf, None)
-                .unwrap();
-            interleave_and_push(&out_buf, chunk_size, &mut prod);
+            let (_in_used, out_written) = if frames_collected < chunk_size {
+                resampler
+                    .process_partial_into_buffer(&input_refs, &mut out_buf, None)
+                    .unwrap()
+            } else {
+                resampler
+                    .process_into_buffer(&input_refs, &mut out_buf, None)
+                    .unwrap()
+            };
+            let output_vecs: Vec<Vec<f32>> = (0..channels)
+                .map(|ch| out_buf[ch][..out_written].to_vec())
+                .collect();
+            interleave_and_push(&output_vecs, out_written, &mut prod);
+        }
+
+        if eof {
+            break; // end of file
         }
     }
 }
@@ -489,7 +511,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     path.push(path_str);
                     let _ = track_tx.send(path);
                     enter_pressed.store(false, Ordering::Relaxed);
-                    println!("enter_pressed");
                 }
             }
         }
