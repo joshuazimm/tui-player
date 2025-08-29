@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, Ordering},
+    mpsc::{Receiver, TryRecvError},
 };
 use std::thread;
 use std::time::Duration;
@@ -87,7 +88,12 @@ fn process_audio_chunks<F>(
     }
 }
 
-fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: usize) {
+/*fn play_audio_file(
+    path: &Path,
+    mut prod: ringbuf::HeapProd<f32>,
+    device_rate: usize,
+    track_rx: Receiver<PathBuf>,
+) {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -139,6 +145,12 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
 
                         if eof {
                             break;
+                        }
+
+                        match track_rx.try_recv() {
+                            Ok(new_path) => {}
+                            Err(TryRecvError::Empty) => {}
+                            Err(TryRecvError::Disconnected) => break, // Channel closed, stop thread
                         }
 
                         frames_collected += 1;
@@ -265,6 +277,65 @@ fn play_audio_file(path: &Path, mut prod: ringbuf::HeapProd<f32>, device_rate: u
 
         _ => panic!("Unsupported file type"),
     }
+}*/
+fn audio_thread(
+    initial_track: PathBuf,
+    mut prod: HeapProd<f32>,
+    device_rate: usize,
+    track_rx: Receiver<PathBuf>,
+) {
+    let mut current_track = initial_track;
+
+    loop {
+        // Load reader fresh for the current track
+        let mut reader = FlacReader::open(&current_track).unwrap();
+        let file_rate = reader.streaminfo().sample_rate as usize;
+        let channels = reader.streaminfo().channels as usize;
+        let bits = reader.streaminfo().bits_per_sample;
+
+        let chunk_size = 4096;
+        let sub_chunks = 1;
+        let mut resampler = SimpleResampler::new(
+            ResamplerKind::Fast,
+            file_rate,
+            device_rate,
+            chunk_size,
+            sub_chunks,
+            channels,
+        )
+        .unwrap();
+
+        let mut sample_iter = reader.samples();
+
+        // Process track until EOF or new track arrives
+        'track_loop: loop {
+            let mut buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
+
+            for frame in 0..chunk_size {
+                for ch in 0..channels {
+                    match sample_iter.next() {
+                        Some(Ok(sample)) => buffers[ch].push(pcm_to_f32(sample, bits, true)),
+                        Some(Err(_)) => continue,
+                        None => break 'track_loop, // EOF
+                    }
+                }
+
+                // Check for new track
+                if let Ok(new_track) = track_rx.try_recv() {
+                    current_track = new_track;
+                    break 'track_loop; // break inner loop to restart track
+                }
+            }
+
+            // Resample & push to prod
+            let input_refs: Vec<&[f32]> = buffers.iter().map(|b| b.as_slice()).collect();
+            let mut out_buf = resampler.output_buffer_allocate(true);
+            resampler
+                .process_into_buffer(&input_refs, &mut out_buf, None)
+                .unwrap();
+            interleave_and_push(&out_buf, chunk_size, &mut prod);
+        }
+    }
 }
 
 fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<f32>) {
@@ -285,6 +356,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout();
     terminal::enable_raw_mode()?;
     execute!(out, EnterAlternateScreen, Hide)?;
+
+    let (track_tx, track_rx) = std::sync::mpsc::channel::<PathBuf>();
 
     let volume = Arc::new(AtomicU32::new(0.05f32.to_bits()));
     let vol_state = Arc::clone(&volume);
@@ -367,8 +440,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn decoder
     // TODO: separate track header collection from decoding for up or downmixing
     //       channels. (Stereo -> Mono, 5.1 -> Stereo, etc)
-    let path = Path::new("test-tracks/Stare Into Death and Be Still Flac.flac");
-    thread::spawn(move || play_audio_file(path, prod, device_rate));
+    thread::spawn(move || {
+        if let Ok(path) = track_rx.recv() {
+            audio_thread(path, prod, device_rate, track_rx);
+        }
+    });
 
     // CPAL output
     let mut last_sample = 0.0f32;
@@ -411,8 +487,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(path_str) = file_list.get_file_from_index(index) {
                     let mut path = file_list.get_path();
                     path.push(path_str);
-                    // TO DO figure out how to play a new track i.e. kill the thread and spawn a
-                    // new stream
+                    let _ = track_tx.send(path);
+                    enter_pressed.store(false, Ordering::Relaxed);
+                    println!("enter_pressed");
                 }
             }
         }
