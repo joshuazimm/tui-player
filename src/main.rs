@@ -95,12 +95,11 @@ fn audio_thread(
         Ok(decoder) => decoder,
         Err(e) => {
             eprintln!("Failed to create decoder for {:?}: {}", current_path, e);
-            return; // or handle error appropriately
+            return;
         }
     };
     let channels = decoder.channels();
     let file_rate = decoder.sample_rate();
-    //let mut iter = decoder.get_reader().samples();
 
     let mut resampler = SimpleResampler::new(
         ResamplerKind::Fast,
@@ -112,69 +111,47 @@ fn audio_thread(
     )
     .unwrap();
 
-    let mut buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
-    let mut out_buf = resampler.output_buffer_allocate(true);
+    process_audio_chunks(
+        resampler,
+        channels,
+        chunk_size,
+        |buffers: &mut Vec<Vec<f32>>| -> (usize, bool) {
+            let mut frames_collected = 0;
+            let mut eof = false;
 
-    loop {
-        // Clear buffers for new chunk
-        for ch in 0..channels {
-            buffers[ch].truncate(0);
-        }
-
-        let mut frames_collected = 0;
-        let mut eof = false;
-
-        while frames_collected < chunk_size {
-            for ch in 0..channels {
-                match decoder.next_sample() {
-                    Some(sample) => buffers[ch].push(sample),
-                    None => {
-                        eof = true;
-                        break;
+            while frames_collected < chunk_size {
+                for ch in 0..channels {
+                    match decoder.next_sample() {
+                        Some(sample) => buffers[ch].push(sample),
+                        None => {
+                            eof = true;
+                            break;
+                        }
                     }
                 }
-            }
-            if eof {
-                break;
-            }
-            frames_collected += 1;
+                if eof {
+                    break;
+                }
+                frames_collected += 1;
 
-            // Check for track change
-            if let Ok(new_path) = track_rx.try_recv() {
-                current_path = new_path;
-                decoder = match decoder_from_path(&current_path) {
-                    Ok(decoder) => decoder,
-                    Err(e) => {
-                        eprintln!("Failed to create decoder for {:?}: {}", current_path, e);
-                        return; // or handle error appropriately
-                    }
-                };
-                break; // restart loop with new decoder
+                // Check for track change
+                if let Ok(new_path) = track_rx.try_recv() {
+                    current_path = new_path;
+                    decoder = match decoder_from_path(&current_path) {
+                        Ok(decoder) => decoder,
+                        Err(e) => {
+                            eprintln!("Failed to create decoder for {:?}: {}", current_path, e);
+                            return (frames_collected, true); // Return what we have and signal EOF
+                        }
+                    };
+                    break; // restart loop with new decoder
+                }
             }
-        }
 
-        // Resample and push
-        if frames_collected > 0 {
-            let input_refs: Vec<&[f32]> = buffers.iter().map(|b| b.as_slice()).collect();
-            let (_in_used, out_written) = if frames_collected < chunk_size {
-                resampler
-                    .process_partial_into_buffer(&input_refs, &mut out_buf, None)
-                    .unwrap()
-            } else {
-                resampler
-                    .process_into_buffer(&input_refs, &mut out_buf, None)
-                    .unwrap()
-            };
-            let output_vecs: Vec<Vec<f32>> = (0..channels)
-                .map(|ch| out_buf[ch][..out_written].to_vec())
-                .collect();
-            interleave_and_push(&output_vecs, out_written, &mut prod);
-        }
-
-        if eof {
-            break; // end of file
-        }
-    }
+            (frames_collected, eof)
+        },
+        &mut prod,
+    );
 }
 
 fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<f32>) {
