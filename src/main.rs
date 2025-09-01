@@ -1,4 +1,6 @@
 // std includes
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::io::stdout;
 use std::path::PathBuf;
 use std::sync::{
@@ -91,10 +93,27 @@ fn audio_thread(
 
     let mut current_path = initial_path;
 
-    let mut decoder = match decoder_from_path(&current_path) {
+    /*let mut decoder = match decoder_from_path(&current_path) {
         Ok(decoder) => decoder,
         Err(e) => {
             eprintln!("Failed to create decoder for {:?}: {}", current_path, e);
+            return;
+        }
+    };*/
+    let mut decoder = match decoder_from_path(&current_path) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("output.txt")
+                .expect("Failed to open output.txt");
+            writeln!(
+                file,
+                "Failed to create decoder for {:?}: {}",
+                current_path, e
+            )
+            .expect("Failed to write to output.txt");
             return;
         }
     };
