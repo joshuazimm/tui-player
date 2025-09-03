@@ -356,7 +356,8 @@ impl OpusTrack {
 pub enum AudioDecoder {
     Flac(FlacTrack),
     Mp3(Mp3Track),
-    Ogg(VorbisTrack),
+    Opus(OpusTrack),
+    Vorbis(VorbisTrack),
 }
 
 impl AudioDecoder {
@@ -364,7 +365,8 @@ impl AudioDecoder {
         match self {
             AudioDecoder::Flac(track) => track.sample_rate as usize,
             AudioDecoder::Mp3(track) => track.sample_rate as usize,
-            AudioDecoder::Ogg(track) => track.sample_rate as usize,
+            AudioDecoder::Vorbis(track) => track.sample_rate as usize,
+            AudioDecoder::Opus(track) => track.sample_rate as usize,
         }
     }
 
@@ -372,7 +374,8 @@ impl AudioDecoder {
         match self {
             AudioDecoder::Flac(track) => track.channels as usize,
             AudioDecoder::Mp3(track) => track.channels as usize,
-            AudioDecoder::Ogg(track) => track.channels as usize,
+            AudioDecoder::Vorbis(track) => track.channels as usize,
+            AudioDecoder::Opus(track) => track.channels as usize,
         }
     }
 
@@ -380,7 +383,8 @@ impl AudioDecoder {
         match self {
             AudioDecoder::Flac(track) => track.bits_per_sample,
             AudioDecoder::Mp3(track) => track.bits_per_sample,
-            AudioDecoder::Ogg(track) => track.bits_per_sample,
+            AudioDecoder::Vorbis(track) => track.bits_per_sample,
+            AudioDecoder::Opus(track) => track.bits_per_sample,
         }
     }
 
@@ -388,7 +392,8 @@ impl AudioDecoder {
         match self {
             AudioDecoder::Flac(track) => track.next_sample(),
             AudioDecoder::Mp3(track) => track.next_sample(),
-            AudioDecoder::Ogg(track) => track.next_sample(),
+            AudioDecoder::Vorbis(track) => track.next_sample(),
+            AudioDecoder::Opus(track) => track.next_sample(),
         }
     }
 }
@@ -412,8 +417,13 @@ pub fn decoder_from_path(
             Ok(AudioDecoder::Mp3(Mp3Track::new(path_str)?))
         }
         "ogg" => {
+            //TODO decide if we want to include opus contained in ogg
             let path_str = path.to_str().ok_or("Invalid path")?;
-            Ok(AudioDecoder::Ogg(VorbisTrack::new(path_str)?))
+            Ok(AudioDecoder::Vorbis(VorbisTrack::new(path_str)?))
+        }
+        "opus" => {
+            let path_str = path.to_str().ok_or("Invalid path")?;
+            Ok(AudioDecoder::Opus(OpusTrack::new(path_str)?))
         }
         _ => Err("Unsupported audio format".into()),
     }
