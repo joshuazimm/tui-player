@@ -9,7 +9,7 @@ use std::sync::{
     mpsc::Receiver,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // internal includes
 mod resampler;
@@ -34,6 +34,7 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Producer, Split},
 };
+use spin_sleep::SpinSleeper;
 
 fn process_audio_chunks<F>(
     mut resampler: SimpleResampler,
@@ -188,6 +189,8 @@ fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / 60); // 60 FPS
+
     let mut out = stdout();
     terminal::enable_raw_mode()?;
     execute!(out, EnterAlternateScreen, Hide)?;
@@ -298,6 +301,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     stream.play()?;
 
+    // Spin sleeper sleeps for the bulk of the allocated wait time,
+    // then spins (busy waits) for the last few microseconds to get 
+    // better accuracy
+    let sleeper = SpinSleeper::default();
+    let mut next_frame = Instant::now();
+    let mut last_resync = Instant::now();
+
     // Main view loop
     loop {
         if key_handler.should_quit() {
@@ -330,13 +340,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // I imagine we'll want to throttle updates depending on
         // the widget at some point so this is just for convenience
 
-        // TODO: We should define a periodic rate for updates on each
-        // Widget and deal with them in a separate thread
+        // TODO: We should define a pubsub system for widgets, where
+        // widgets are rendered only when a state they care about changes
+        // (e.g. volume, track name, etc)
+        // I think we may also want to consider moving updates into a
+        // separate thread while still keeping it event driven and change
+        // widget states to be shared between render and update threads.
         layout.update_all()?;
-
         layout.render_all(&mut out)?;
+        
+        // Frame pacing for target FPS
+        next_frame += FRAME_TIME;
+        let now = Instant::now();
 
-        std::thread::sleep(Duration::from_millis(120));
+        if next_frame > now {
+            sleeper.sleep(next_frame - now);
+        } else {
+            // Running behind, catch up
+            next_frame = now;
+        }
+
+        // Periodic resync every ~2 seconds to avoid long-term drift 
+        // and overflow in next_frame
+        if last_resync.elapsed() >= Duration::from_secs(2) {
+            next_frame = Instant::now();
+            last_resync = next_frame;
+        }
     }
 
     key_handler.stop();
