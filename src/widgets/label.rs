@@ -2,7 +2,7 @@
 //       consider making autogen or at least templating
 //       common parts of the code
 use crossterm::style::Color;
-use crate::widget::{Rect, Widget, Cell};
+use crate::widget::{AbsRect, Widget, Cell};
 
 #[derive(Debug, Clone)]
 pub struct Label {
@@ -28,8 +28,8 @@ impl Widget for Label {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    fn render(&self, area: &Rect, buf: &mut [Vec<Cell>], term_width: u16, term_height: u16) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute(term_width, term_height);
+    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+        let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width, area.height);
         let x_start = if self.align_center {
             abs_x as usize + (abs_width as usize).saturating_sub(self.text.len()) / 2
         } else {

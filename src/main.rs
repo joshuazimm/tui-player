@@ -229,14 +229,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sections: vec![
             Section::new(
                 Rect {
-                    x: 0.0,
+                    x: 0.7,
                     y: 0.0,
-                    width: 0.5,
+                    width: 0.3,
+                    height: 1.0,
+                },
+                WidgetKind::Label(Label {
+                    text: "Test Circle".into(),
+                    align_center: true,
+                    rainbow: true,
+                    tick: 0,
+                }),
+            ),
+            Section::new(
+                Rect {
+                    x: 0.3,
+                    y: 0.0,
+                    width: 0.4,
                     height: 0.3,
                 },
-                true,
+                WidgetKind::Controls(Controls::new(Arc::clone(&is_paused), Arc::clone(&volume))),
+            ),
+            Section::new(
+                Rect {
+                    x: 0.3,
+                    y: 0.7,
+                    width: 0.4,
+                    height: 0.3,
+                },
                 WidgetKind::Label(Label {
-                    text: "Now Playing: Stare Into Death and Be Still".into(),
+                    text: "Test Circle".into(),
                     align_center: true,
                     rainbow: true,
                     tick: 0,
@@ -245,21 +267,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Section::new(
                 Rect {
                     x: 0.0,
-                    y: 0.3,
-                    width: 0.5,
-                    height: 0.7,
+                    y: 0.0,
+                    width: 0.3,
+                    height: 1.0,
                 },
-                true,
-                WidgetKind::Controls(Controls::new(Arc::clone(&is_paused), Arc::clone(&volume))),
+                WidgetKind::Label(Label {
+                    text: "Test Circle".into(),
+                    align_center: true,
+                    rainbow: true,
+                    tick: 0,
+                }),
             ),
             Section::new(
                 Rect {
-                    x: 0.5,
-                    y: 0.0,
-                    width: 0.5,
-                    height: 1.0,
+                    x: 0.3,
+                    y: 0.3,
+                    width: 0.4,
+                    height: 0.4,
                 },
-                true,
                 WidgetKind::FileList(file_list),
             ),
         ],

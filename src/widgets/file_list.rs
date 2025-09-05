@@ -1,4 +1,4 @@
-use crate::widget::{Rect, Widget, Cell};
+use crate::widget::{AbsRect, Widget, Cell};
 use crossterm::style::Color;
 use std::fs;
 use std::path::PathBuf;
@@ -130,9 +130,9 @@ impl Widget for FileList {
 
         Ok(())
     }*/
-    fn render(&self, area: &Rect, buf: &mut [Vec<Cell>], term_width: u16, term_height: u16) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute(term_width, term_height);
-        let visible_lines = (abs_height.saturating_sub(PADDING + 1)) as usize;
+    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+        let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width, area.height);
+        let visible_lines = (abs_height.saturating_sub(PADDING)) as usize;
         let total_files = self.files.len();
 
         if total_files == 0 {
@@ -148,7 +148,7 @@ impl Widget for FileList {
         };
 
         let end_index = (scroll_offset + visible_lines).min(total_files);
-        let max_width = abs_width.saturating_sub(PADDING + 1);
+        let max_width = abs_width.saturating_sub(PADDING);
 
         for (i, line) in self.files[scroll_offset..end_index].iter().enumerate() {
             let line_index = scroll_offset + i;

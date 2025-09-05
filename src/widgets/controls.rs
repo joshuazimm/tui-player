@@ -1,4 +1,4 @@
-use crate::widget::{Rect, Widget, Cell};
+use crate::widget::{AbsRect, Widget, Cell};
 use std::sync::{Arc, atomic::{AtomicU32, Ordering, AtomicBool}};
 use crossterm::style::Color;
 use unicode_width::UnicodeWidthStr;
@@ -32,8 +32,8 @@ impl Widget for Controls {
         );
     }
 
-    fn render(&self, area: &Rect, buf: &mut [Vec<Cell>], term_width: u16, term_height: u16) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute(term_width, term_height);
+    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+        let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width, area.height);
         let y = abs_y as usize + (abs_height as usize / 2);
 
         let text_width = UnicodeWidthStr::width(self.cached_text.as_str());
