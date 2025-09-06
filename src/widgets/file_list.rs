@@ -71,65 +71,6 @@ impl Widget for FileList {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    /*fn render(&self, area: &Rect, buf: &mut String) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = area.to_absolute();
-
-        let selected_index = self.selected.load(Ordering::Relaxed) as usize % self.files.len();
-        let end_index = (selected_index + abs_height as usize).min(self.files.len());
-
-        // Only render as many lines as fit in the area
-        for (i, line) in self.files[selected_index..end_index].iter().enumerate() {
-            if i as u16 > abs_height - PADDING {
-                break;
-            }
-
-            let x_start = if self.align_center {
-                abs_x + (abs_width.saturating_sub(line.len() as u16) / 2)
-            } else {
-                abs_x + PADDING
-            };
-            let y = (abs_y + PADDING) + i as u16;
-
-            // set up highlight colors
-            let (default_fg, bg) = if i == selected_index {
-                (Color::Black, Some(Color::White))
-            } else {
-                (Color::White, None)
-            };
-
-            if self.rainbow {
-                for (j, ch) in line.chars().enumerate() {
-                    let x = x_start + j as u16;
-                    let fg = if i == selected_index {
-                        Color::Black // override
-                    } else {
-                        rainbow_color(j + self.tick)
-                    };
-                    buf.push_str(&format!(
-                        "{}{}{}{}{}",
-                        cursor::MoveTo(x, y),
-                        SetForegroundColor(fg),
-                        bg.map(|c| SetBackgroundColor(c).to_string())
-                            .unwrap_or_default(),
-                        ch,
-                        ResetColor
-                    ));
-                }
-            } else {
-                buf.push_str(&format!(
-                    "{}{}{}{}{}",
-                    cursor::MoveTo(x_start, y),
-                    SetForegroundColor(default_fg),
-                    bg.map(|c| SetBackgroundColor(c).to_string())
-                        .unwrap_or_default(),
-                    line,
-                    ResetColor
-                ));
-            }
-        }
-
-        Ok(())
-    }*/
     fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
         let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width, area.height);
         let visible_lines = (abs_height.saturating_sub(PADDING)) as usize;
