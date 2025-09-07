@@ -17,7 +17,7 @@ use resampler::{ResamplerKind, SimpleResampler};
 mod widget;
 use widget::{Layout, Rect, Section};
 mod widgets;
-use widgets::{Controls, FileList, Label, WidgetKind};
+use widgets::{AlbumArt, Controls, FileList, Label, WidgetKind};
 mod keyhandler;
 use keyhandler::KeyHandler;
 mod decoder;
@@ -234,12 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     width: 0.3,
                     height: 1.0,
                 },
-                WidgetKind::Label(Label {
-                    text: "Test Circle".into(),
-                    align_center: true,
-                    rainbow: true,
-                    tick: 0,
-                }),
+                WidgetKind::AlbumArt(AlbumArt::new(false)),
             ),
             Section::new(
                 Rect {

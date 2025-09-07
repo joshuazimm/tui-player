@@ -12,6 +12,7 @@
 pub mod controls;
 pub mod file_list;
 pub mod label;
+pub mod album_art;
 //pub mod progress_bar;
 //pub mod scroll_panel;
 //pub mod image;
@@ -22,6 +23,7 @@ use enum_dispatch::enum_dispatch;
 pub use controls::Controls;
 pub use file_list::FileList;
 pub use label::Label;
+pub use album_art::AlbumArt;
 //pub use progress_bar::ProgressBar;
 //pub use scroll_panel::ScrollPanel;
 //pub use image::ImageWidget;
@@ -33,6 +35,7 @@ pub enum WidgetKind {
     Label(Label),
     Controls(Controls),
     FileList(FileList),
+    AlbumArt(AlbumArt),
     //ProgressBar(ProgressBar),
     //ScrollPanel(ScrollPanel),
     //Image(ImageWidget)
