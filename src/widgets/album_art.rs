@@ -74,15 +74,17 @@ impl Widget for AlbumArt {
             for bx in 0..draw_w {
                 let x0 = bx * img_w / draw_w;
                 let x1 = (bx + 1) * img_w / draw_w;
-                let y0 = by * img_h / draw_h;
-                let y1 = (by + 1) * img_h / draw_h;
 
-                let mut r_sum: u64 = 0; 
+                // Top half (FG)
+                let y0_top = (by * 2) * img_h / (draw_h * 2);
+                let y1_top = (by * 2 + 1) * img_h / (draw_h * 2);
+
+                let mut r_sum: u64 = 0;
                 let mut g_sum: u64 = 0;
-                let mut b_sum: u64 = 0; 
+                let mut b_sum: u64 = 0;
                 let mut count: u64 = 0;
 
-                for y in y0..y1 {
+                for y in y0_top..y1_top {
                     for x in x0..x1 {
                         let p = img.get_pixel(x, y).0;
                         r_sum += p[0] as u64;
@@ -92,15 +94,52 @@ impl Widget for AlbumArt {
                     }
                 }
 
-                if count > 0 {
-                    let r = (r_sum / count) as u8;
-                    let g = (g_sum / count) as u8;
-                    let b = (b_sum / count) as u8;
-                    let x = area.x as i32 + bx as i32 + offset_x;
-                    let y = area.y as i32 + by as i32 + offset_y;
-                    buf[y as usize][x as usize].ch = ' ';
-                    buf[y as usize][x as usize].bg = Some(Color::Rgb{ r, g, b });
+                let fg = if count > 0 {
+                    Color::Rgb {
+                        r: (r_sum / count) as u8,
+                        g: (g_sum / count) as u8,
+                        b: (b_sum / count) as u8,
+                    }
+                } else {
+                    Color::Black
+                };
+
+                // Bottom half (BG)
+                let y0_bot = (by * 2 + 1) * img_h / (draw_h * 2);
+                let y1_bot = (by * 2 + 2) * img_h / (draw_h * 2);
+
+                let mut r_sum: u64 = 0;
+                let mut g_sum: u64 = 0;
+                let mut b_sum: u64 = 0;
+                let mut count: u64 = 0;
+
+                for y in y0_bot..y1_bot {
+                    for x in x0..x1 {
+                        let p = img.get_pixel(x, y).0;
+                        r_sum += p[0] as u64;
+                        g_sum += p[1] as u64;
+                        b_sum += p[2] as u64;
+                        count += 1;
+                    }
                 }
+
+                let bg = if count > 0 {
+                    Color::Rgb {
+                        r: (r_sum / count) as u8,
+                        g: (g_sum / count) as u8,
+                        b: (b_sum / count) as u8,
+                    }
+                } else {
+                    Color::Black
+                };
+
+                // Write Both FG and BG Pixels to Buffer
+                let x = area.x as i32 + bx as i32 + offset_x;
+                let y = area.y as i32 + by as i32 + offset_y;
+
+                buf[y as usize][x as usize].ch = '▀';
+                buf[y as usize][x as usize].fg = Some(fg);
+                buf[y as usize][x as usize].bg = Some(bg);
             }
         }
 
