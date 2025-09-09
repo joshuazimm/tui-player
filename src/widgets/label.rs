@@ -12,6 +12,12 @@ pub struct Label {
     pub tick: usize,
 }
 
+impl Label {
+    pub fn set_text(&mut self, new_text: impl Into<String>) {
+        self.text = new_text.into();
+    }
+}
+
 fn rainbow_color(i: usize) -> Color {
     match i % 6 {
         0 => Color::Red,
@@ -30,15 +36,31 @@ impl Widget for Label {
 
     fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
         let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width, area.height);
+
+        // truncate + ellipsis if text does not fit
+        let mut display_text = self.text.clone();
+        if display_text.len() > abs_width as usize {
+            if abs_width > 1 {
+                display_text.truncate(abs_width as usize - 1);
+                display_text.push('…');
+            } else {
+                display_text = "…".to_string();
+            }
+        }
+
+        // Horizontal positioning
         let x_start = if self.align_center {
-            abs_x as usize + (abs_width as usize).saturating_sub(self.text.len()) / 2
+            abs_x as usize + (abs_width as usize).saturating_sub(display_text.len()) / 2
         } else {
             abs_x as usize
         };
+        
+        // Vertical positioning (always center)
         let y = abs_y as usize + abs_height as usize / 2;
 
+        // Render text
         if self.rainbow {
-            for (i, ch) in self.text.chars().enumerate() {
+            for (i, ch) in display_text.chars().enumerate() {
                 let x = x_start + i;
                 if y < buf.len() && x < buf[0].len() {
                     buf[y][x].ch = ch;
@@ -46,7 +68,7 @@ impl Widget for Label {
                 }
             }
         } else {
-            for (i, ch) in self.text.chars().enumerate() {
+            for (i, ch) in display_text.chars().enumerate() {
                 let x = x_start + i;
                 if y < buf.len() && x < buf[0].len() {
                     buf[y][x].ch = ch;

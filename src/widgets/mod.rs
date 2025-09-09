@@ -42,6 +42,14 @@ pub enum WidgetKind {
 }
 
 impl WidgetKind {
+    pub fn as_label(&mut self) -> Option<&mut Label> {
+        if let WidgetKind::Label(Label) = self {
+            Some(Label)
+        } else {
+            None
+        }
+    }
+
     pub fn as_file_list(&self) -> Option<&FileList> {
         if let WidgetKind::FileList(file_list) = self {
             Some(file_list)

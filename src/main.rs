@@ -5,7 +5,7 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     mpsc::Receiver,
 };
 use std::thread;
@@ -88,6 +88,7 @@ fn audio_thread(
     mut prod: ringbuf::HeapProd<f32>,
     device_rate: usize,
     track_rx: Receiver<PathBuf>,
+    frame_counter: Arc<AtomicU64>,
 ) {
     let chunk_size = 4096;
     let sub_chunks = 1;
@@ -164,6 +165,7 @@ fn audio_thread(
                             return (frames_collected, true); // Return what we have and signal EOF
                         }
                     };
+                    frame_counter.store(0, Ordering::Relaxed);
                     break; // restart loop with new decoder
                 }
             }
@@ -185,6 +187,24 @@ fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<
                 thread::sleep(Duration::from_micros(50));
             }
         }
+    }
+}
+
+fn get_playback_time(counter: &AtomicU64, sample_rate: u64) -> f64 {
+    let frames = counter.load(Ordering::Relaxed);
+    frames as f64 / sample_rate as f64
+}
+
+fn format_time(seconds: f64) -> String {
+    let total_seconds = seconds.floor() as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let secs = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{:02}:{:02}:{:02}", hours, minutes, secs)
+    } else {
+        format!("{:02}:{:02}", minutes, secs)
     }
 }
 
@@ -229,31 +249,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sections: vec![
             Section::new(
                 Rect {
-                    x: 0.7,
+                    x: 0.0,
                     y: 0.0,
                     width: 0.3,
-                    height: 1.0,
+                    height: 0.6,
                 },
-                WidgetKind::AlbumArt(AlbumArt::new(false)),
+                WidgetKind::FileList(file_list),
             ),
             Section::new(
                 Rect {
-                    x: 0.3,
-                    y: 0.0,
-                    width: 0.4,
-                    height: 0.3,
-                },
-                WidgetKind::Controls(Controls::new(Arc::clone(&is_paused), Arc::clone(&volume))),
-            ),
-            Section::new(
-                Rect {
-                    x: 0.3,
-                    y: 0.7,
-                    width: 0.4,
-                    height: 0.3,
+                    x: 0.0,
+                    y: 0.6,
+                    width: 0.3,
+                    height: 0.2,
                 },
                 WidgetKind::Label(Label {
-                    text: "Test Circle".into(),
+                    text: "Test Circle Test Circle Test Circle".into(),
                     align_center: true,
                     rainbow: true,
                     tick: 0,
@@ -262,25 +273,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Section::new(
                 Rect {
                     x: 0.0,
-                    y: 0.0,
+                    y: 0.8,
                     width: 0.3,
-                    height: 1.0,
+                    height: 0.2,
                 },
-                WidgetKind::Label(Label {
-                    text: "Test Circle".into(),
-                    align_center: true,
-                    rainbow: true,
-                    tick: 0,
-                }),
+                WidgetKind::Controls(Controls::new(Arc::clone(&is_paused), Arc::clone(&volume))),
             ),
             Section::new(
                 Rect {
                     x: 0.3,
-                    y: 0.3,
-                    width: 0.4,
-                    height: 0.4,
+                    y: 0.0,
+                    width: 0.7,
+                    height: 1.0,
                 },
-                WidgetKind::FileList(file_list),
+                WidgetKind::AlbumArt(AlbumArt::new(false)),
             ),
         ],
     };
@@ -294,26 +300,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     key_handler.start();
 
+    let frame_counter = Arc::new(AtomicU64::new(0));
+    let counter_clone = frame_counter.clone();
+    let counter_clone_2 = frame_counter.clone();
+
     // Spawn decoder
     // TODO: separate track header collection from decoding for up or downmixing
     //       channels. (Stereo -> Mono, 5.1 -> Stereo, etc)
     thread::spawn(move || {
         if let Ok(path) = track_rx.recv() {
-            audio_thread(path, prod, device_rate, track_rx);
+            audio_thread(path, prod, device_rate, track_rx, frame_counter);
         }
     });
 
     // CPAL output
     let mut last_sample = 0.0f32;
+    let channels = wanted_config.channels() as u64;
+    
     let stream = device.build_output_stream(
         &wanted_config.into(),
         move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            let mut consumed_any = false;
+
             for sample in output.iter_mut() {
                 if let Some(s) = cons.try_pop() {
                     last_sample = s;
+                    consumed_any = true;
                 }
                 let vol = f32::from_bits(vol_state.load(Ordering::Relaxed));
                 *sample = (last_sample * vol).clamp(-1.0, 1.0);
+            }
+
+            if consumed_any {
+                let frames_written = (output.len() as u64) / channels;
+                counter_clone.fetch_add(frames_written, Ordering::Relaxed);
             }
         },
         |err| eprintln!("Stream error: {:?}", err),
@@ -355,6 +375,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     enter_pressed.store(false, Ordering::Relaxed);
                 }
             }
+        }
+
+        if let Some(label) = layout.sections.iter_mut().find_map(|section| section.widget.as_label()) {
+            let secs = get_playback_time(&counter_clone_2, device_rate as u64);
+            label.set_text(format_time(secs));
         }
 
         // I imagine we'll want to throttle updates depending on

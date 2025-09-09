@@ -21,7 +21,7 @@ impl AlbumArt {
 
 impl Widget for AlbumArt {
     fn update(&mut self) {
-        let path = "test-tracks/Woodland/cover.jpg";
+        let path = "test-tracks/cover.jpg";
         let img = ImageReader::open(path)
             .unwrap()
             .decode()
@@ -48,7 +48,7 @@ impl Widget for AlbumArt {
 
         // Multiply img_w by 2 to account for terminal character aspect ratio
         // being roughly 1:2 (width:height)
-        let img_aspect = img_w as f32 / img_h as f32 * 2.0;
+        let img_aspect = img_w as f32 / img_h as f32 * 1.9;
         let target_aspect = target_w as f32 / target_h as f32;
 
         let (draw_w, draw_h, offset_x, offset_y) = if self.stretch {
