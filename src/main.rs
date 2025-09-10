@@ -17,7 +17,7 @@ use resampler::{ResamplerKind, SimpleResampler};
 mod widget;
 use widget::{Layout, Rect, Section};
 mod widgets;
-use widgets::{AlbumArt, Controls, FileList, Label, WidgetKind};
+use widgets::{AlbumArt, Controls, FileList, Label, ProgressBar, WidgetKind};
 mod keyhandler;
 use keyhandler::KeyHandler;
 mod decoder;
@@ -36,48 +36,56 @@ use ringbuf::{
 };
 use spin_sleep::SpinSleeper;
 
-fn process_audio_chunks<F>(
+fn process_audio_chunks<F, C>(
     mut resampler: SimpleResampler,
     channels: usize,
     chunk_size: usize,
     mut fill_buffers: F,
+    mut check_path: C,
     prod: &mut HeapProd<f32>,
 ) where
     F: FnMut(&mut Vec<Vec<f32>>) -> (usize, bool),
+    C: FnMut() -> bool,
 {
     let mut buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
     let mut out_buf = resampler.output_buffer_allocate(true);
 
+    let mut eof = false;
     loop {
-        // Clear buffers for the new chunk
-        for ch in 0..channels {
-            buffers[ch].truncate(0);
+        if !eof {
+            for ch in 0..channels {
+                buffers[ch].truncate(0);
+            }
+
+            // Fill buffers using decoder callback
+            let (frames_collected, temp_eof) = fill_buffers(&mut buffers);
+            eof = temp_eof;
+
+            if frames_collected > 0 {
+                // Process the chunk
+                let input_refs: Vec<&[f32]> = buffers.iter().map(|b| b.as_slice()).collect();
+                let (_in_used, out_written) = if frames_collected < chunk_size {
+                    resampler
+                        .process_partial_into_buffer(&input_refs, &mut out_buf, None)
+                        .unwrap()
+                } else {
+                    resampler
+                        .process_into_buffer(&input_refs, &mut out_buf, None)
+                        .unwrap()
+                };
+
+                // Convert resampler output buffer to Vec<Vec<f32>> format
+                let output_vecs: Vec<Vec<f32>> = (0..channels)
+                    .map(|ch| out_buf[ch][..out_written].to_vec())
+                    .collect();
+                interleave_and_push(&output_vecs, out_written, prod);
+            }
+        }
+        else {
+            thread::sleep(Duration::from_millis(50));
         }
 
-        // Fill buffers using decoder callback
-        let (frames_collected, eof) = fill_buffers(&mut buffers);
-
-        if frames_collected > 0 {
-            // Process the chunk
-            let input_refs: Vec<&[f32]> = buffers.iter().map(|b| b.as_slice()).collect();
-            let (_in_used, out_written) = if frames_collected < chunk_size {
-                resampler
-                    .process_partial_into_buffer(&input_refs, &mut out_buf, None)
-                    .unwrap()
-            } else {
-                resampler
-                    .process_into_buffer(&input_refs, &mut out_buf, None)
-                    .unwrap()
-            };
-
-            // Convert resampler output buffer to Vec<Vec<f32>> format
-            let output_vecs: Vec<Vec<f32>> = (0..channels)
-                .map(|ch| out_buf[ch][..out_written].to_vec())
-                .collect();
-            interleave_and_push(&output_vecs, out_written, prod);
-        }
-
-        if eof {
+        if check_path() {
             break;
         }
     }
@@ -89,91 +97,95 @@ fn audio_thread(
     device_rate: usize,
     track_rx: Receiver<PathBuf>,
     frame_counter: Arc<AtomicU64>,
+    total_samples_counter: Arc<AtomicU64>,
 ) {
     let chunk_size = 4096;
     let sub_chunks = 1;
 
     let mut current_path = initial_path;
 
-    /*let mut decoder = match decoder_from_path(&current_path) {
-        Ok(decoder) => decoder,
-        Err(e) => {
-            eprintln!("Failed to create decoder for {:?}: {}", current_path, e);
-            return;
-        }
-    };*/
-    let mut decoder = match decoder_from_path(&current_path) {
-        Ok(decoder) => decoder,
-        Err(e) => {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("output.txt")
-                .expect("Failed to open output.txt");
-            writeln!(
-                file,
-                "Failed to create decoder for {:?}: {}",
-                current_path, e
-            )
-            .expect("Failed to write to output.txt");
-            return;
-        }
-    };
-    let channels = decoder.channels();
-    let file_rate = decoder.sample_rate();
-
-    let resampler = SimpleResampler::new(
-        ResamplerKind::Fast,
-        file_rate,
-        device_rate,
-        chunk_size,
-        sub_chunks,
-        channels,
-    )
-    .unwrap();
-
-    process_audio_chunks(
-        resampler,
-        channels,
-        chunk_size,
-        |buffers: &mut Vec<Vec<f32>>| -> (usize, bool) {
-            let mut frames_collected = 0;
-            let mut eof = false;
-
-            while frames_collected < chunk_size {
-                for ch in 0..channels {
-                    match decoder.next_sample() {
-                        Some(sample) => buffers[ch].push(sample),
-                        None => {
-                            eof = true;
-                            break;
-                        }
+    loop {
+        let mut decoder = match decoder_from_path(&current_path) {
+            Ok(decoder) => decoder,
+            Err(e) => {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("output.txt")
+                    .expect("Failed to open output.txt");
+                writeln!(
+                    file,
+                    "Failed to create decoder for {:?}: {}",
+                    current_path, e
+                )
+                .expect("Failed to write to output.txt");
+                
+                // Wait for a new path and retry
+                match track_rx.recv() {
+                    Ok(new_path) => {
+                        current_path = new_path;
+                        continue;
                     }
-                }
-                if eof {
-                    break;
-                }
-                frames_collected += 1;
-
-                // Check for track change
-                if let Ok(new_path) = track_rx.try_recv() {
-                    current_path = new_path;
-                    decoder = match decoder_from_path(&current_path) {
-                        Ok(decoder) => decoder,
-                        Err(e) => {
-                            eprintln!("Failed to create decoder for {:?}: {}", current_path, e);
-                            return (frames_collected, true); // Return what we have and signal EOF
-                        }
-                    };
-                    frame_counter.store(0, Ordering::Relaxed);
-                    break; // restart loop with new decoder
+                    Err(_) => return, // Channel closed
                 }
             }
+        };
+        
+        let channels = decoder.channels();
+        let file_rate = decoder.sample_rate();
+        total_samples_counter.store(
+            (decoder.total_samples() as f64 / decoder.sample_rate() as f64).to_bits(),
+            Ordering::Relaxed,
+        );
 
-            (frames_collected, eof)
-        },
-        &mut prod,
-    );
+        let resampler = SimpleResampler::new(
+            ResamplerKind::Fast,
+            file_rate,
+            device_rate,
+            chunk_size,
+            sub_chunks,
+            channels,
+        )
+        .unwrap();
+
+        process_audio_chunks(
+            resampler,
+            channels,
+            chunk_size,
+            |buffers: &mut Vec<Vec<f32>>| -> (usize, bool) {
+                let mut frames_collected = 0;
+                let mut eof = false;
+
+                while frames_collected < chunk_size {
+                    for ch in 0..channels {
+                        match decoder.next_sample() {
+                            Some(sample) => buffers[ch].push(sample),
+                            None => {
+                                eof = true;
+                                break;
+                            }
+                        }
+                    }
+                    if eof {
+                        break;
+                    }
+                    frames_collected += 1;
+                }
+
+                (frames_collected, eof)
+            },
+            || -> bool {
+                if let Ok(new_path) = track_rx.try_recv() {
+                    current_path = new_path;
+                    frame_counter.store(0, Ordering::Relaxed);
+                    true
+                } else {
+                    false
+                }
+            },
+            &mut prod,
+        );
+    }
 }
 
 fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<f32>) {
@@ -193,19 +205,6 @@ fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<
 fn get_playback_time(counter: &AtomicU64, sample_rate: u64) -> f64 {
     let frames = counter.load(Ordering::Relaxed);
     frames as f64 / sample_rate as f64
-}
-
-fn format_time(seconds: f64) -> String {
-    let total_seconds = seconds.floor() as u64;
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let secs = total_seconds % 60;
-
-    if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, minutes, secs)
-    } else {
-        format!("{:02}:{:02}", minutes, secs)
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -241,7 +240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rb = HeapRb::<f32>::new(device_rate * 2);
     let (prod, mut cons): (HeapProd<f32>, HeapCons<f32>) = rb.split();
 
-    let file_list = FileList::new(PathBuf::from("test-tracks/Woodland"), Arc::clone(&select_index));
+    let file_list = FileList::new(PathBuf::from("test-tracks"), Arc::clone(&select_index));
 
     // Define view layout
     // TODO: Move to separate config file & add xml parsing
@@ -252,14 +251,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     x: 0.0,
                     y: 0.0,
                     width: 0.3,
-                    height: 0.6,
+                    height: 0.5,
                 },
                 WidgetKind::FileList(file_list),
             ),
             Section::new(
                 Rect {
                     x: 0.0,
-                    y: 0.6,
+                    y: 0.5,
                     width: 0.3,
                     height: 0.2,
                 },
@@ -273,7 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Section::new(
                 Rect {
                     x: 0.0,
-                    y: 0.8,
+                    y: 0.7,
                     width: 0.3,
                     height: 0.2,
                 },
@@ -281,10 +280,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             Section::new(
                 Rect {
+                    x: 0.0,
+                    y: 0.9,
+                    width: 1.0,
+                    height: 0.1,
+                },
+                WidgetKind::ProgressBar(ProgressBar::new()),
+            ),
+            Section::new(
+                Rect {
                     x: 0.3,
                     y: 0.0,
                     width: 0.7,
-                    height: 1.0,
+                    height: 0.9,
                 },
                 WidgetKind::AlbumArt(AlbumArt::new(false)),
             ),
@@ -304,12 +312,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let counter_clone = frame_counter.clone();
     let counter_clone_2 = frame_counter.clone();
 
+    let total_samples = Arc::new(AtomicU64::new(0));
+    let total_samples_clone = total_samples.clone();
+    let total_samples_clone_2 = total_samples.clone();
+
     // Spawn decoder
     // TODO: separate track header collection from decoding for up or downmixing
     //       channels. (Stereo -> Mono, 5.1 -> Stereo, etc)
     thread::spawn(move || {
         if let Ok(path) = track_rx.recv() {
-            audio_thread(path, prod, device_rate, track_rx, frame_counter);
+            audio_thread(path, prod, device_rate, track_rx, frame_counter, total_samples_clone);
         }
     });
 
@@ -377,9 +389,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if let Some(label) = layout.sections.iter_mut().find_map(|section| section.widget.as_label()) {
+        if let Some(progress_bar) = layout.sections.iter_mut().find_map(|section| section.widget.as_progress_bar()) {
             let secs = get_playback_time(&counter_clone_2, device_rate as u64);
-            label.set_text(format_time(secs));
+            let total = f64::from_bits(total_samples_clone_2.load(Ordering::Relaxed));
+            //print!("{}", total);
+            progress_bar.set_progress(secs);
+            progress_bar.set_total(total);
         }
 
         // I imagine we'll want to throttle updates depending on

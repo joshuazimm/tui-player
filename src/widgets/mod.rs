@@ -13,7 +13,7 @@ pub mod controls;
 pub mod file_list;
 pub mod label;
 pub mod album_art;
-//pub mod progress_bar;
+pub mod progress_bar;
 //pub mod scroll_panel;
 //pub mod image;
 
@@ -24,7 +24,7 @@ pub use controls::Controls;
 pub use file_list::FileList;
 pub use label::Label;
 pub use album_art::AlbumArt;
-//pub use progress_bar::ProgressBar;
+pub use progress_bar::ProgressBar;
 //pub use scroll_panel::ScrollPanel;
 //pub use image::ImageWidget;
 
@@ -36,15 +36,23 @@ pub enum WidgetKind {
     Controls(Controls),
     FileList(FileList),
     AlbumArt(AlbumArt),
-    //ProgressBar(ProgressBar),
+    ProgressBar(ProgressBar),
     //ScrollPanel(ScrollPanel),
     //Image(ImageWidget)
 }
 
 impl WidgetKind {
     pub fn as_label(&mut self) -> Option<&mut Label> {
-        if let WidgetKind::Label(Label) = self {
-            Some(Label)
+        if let WidgetKind::Label(label) = self {
+            Some(label)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_progress_bar(&mut self) -> Option<&mut ProgressBar> {
+        if let WidgetKind::ProgressBar(progress_bar) = self {
+            Some(progress_bar)
         } else {
             None
         }

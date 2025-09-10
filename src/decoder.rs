@@ -4,11 +4,12 @@ use lewton::VorbisError;
 use lewton::inside_ogg::OggStreamReader;
 use minimp3::Decoder as Minimp3Decoder;
 use minimp3::{Error, Frame};
+use mp3_duration::from_path;
 use ogg::reading::PacketReader;
 use opus::{Channels, Decoder as OpusDecoder};
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Seek, SeekFrom, Read};
 use std::path::Path;
 
 pub struct FlacTrack {
@@ -19,6 +20,7 @@ pub struct FlacTrack {
     sample_rate: u32,
     channels: u32,
     bits_per_sample: u32,
+    total_samples: u64,
 }
 
 impl FlacTrack {
@@ -34,6 +36,7 @@ impl FlacTrack {
             sample_rate: si.sample_rate,
             channels: si.channels,
             bits_per_sample: si.bits_per_sample,
+            total_samples: si.samples.unwrap_or(0),
         })
     }
 
@@ -96,23 +99,29 @@ pub struct Mp3Track {
     current_frame: Option<Frame>,
     sample_index: usize,
     sample_rate: u32,
-    channels: u32
+    channels: u32,
+    total_samples: u64,
 }
 
 impl Mp3Track {
     pub fn new(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+
         let mut reader = Minimp3Decoder::new(File::open(path).unwrap());
         let _chunk_size = 1152;
         let current_frame = reader.next_frame().unwrap();
         let sample_rate = current_frame.sample_rate as u32;
         let channels = current_frame.channels as u32;
         let _bits_per_sample = current_frame.bitrate as u32;
+        let duration = from_path(path)?;
+        let samples = duration.as_nanos() * sample_rate as u128 / 1_000_000_000u128;
+
         Ok(Mp3Track {
             reader,
             current_frame: Some(current_frame),
             sample_index: 0,
             sample_rate,
-            channels
+            channels,
+            total_samples: samples as u64,
         })
     }
 
@@ -151,12 +160,48 @@ impl Mp3Track {
     }
 }
 
+fn get_total_samples(path: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let mut file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    
+    // Search the last 64KB of the file for the final granule position
+    let search_size = std::cmp::min(file_size, 65536);
+    file.seek(SeekFrom::End(-(search_size as i64)))?;
+    
+    let mut buffer = vec![0u8; search_size as usize];
+    file.read_exact(&mut buffer)?;
+    
+    let mut total_samples = 0u64;
+    let mut pos = 0;
+    
+    // Look for "OggS" page signatures
+    while pos + 14 <= buffer.len() {
+        if &buffer[pos..pos + 4] == b"OggS" {
+            // Extract granule position (8 bytes at offset 6)
+            let granule_bytes = &buffer[pos + 6..pos + 14];
+            let granule_pos = u64::from_le_bytes([
+                granule_bytes[0], granule_bytes[1], granule_bytes[2], granule_bytes[3],
+                granule_bytes[4], granule_bytes[5], granule_bytes[6], granule_bytes[7],
+            ]);
+            
+            // Valid granule position (not -1/0xFFFFFFFFFFFFFFFF)
+            if granule_pos != u64::MAX {
+                total_samples = granule_pos;
+            }
+        }
+        pos += 1;
+    }
+    
+    Ok(total_samples)
+}
+
 pub struct VorbisTrack {
     reader: OggStreamReader<BufReader<File>>,
     sample_rate: u32,
     channels: u32,
     buffer: VecDeque<f32>,
     finished: bool,
+    total_samples: u64,
 }
 
 impl VorbisTrack {
@@ -166,13 +211,15 @@ impl VorbisTrack {
         let sample_rate = header.audio_sample_rate;
         let channels = header.audio_channels as u32;
         let _bits_per_sample = 16; // Vorbis decoded samples are i16
+        let samples = get_total_samples(path);
 
         Ok(VorbisTrack {
             reader,
             sample_rate,
             channels,
             buffer: VecDeque::new(),
-            finished: false
+            finished: false,
+            total_samples: samples?,
         })
     }
 
@@ -231,6 +278,7 @@ pub struct OpusTrack {
     finished: bool,
     sample_rate: u32,
     channels: u32,
+    total_samples: u64,
     // Opus-specific
     pre_skip: u16,
     samples_decoded: u64,
@@ -271,6 +319,21 @@ impl OpusTrack {
         };
 
         let decoder = OpusDecoder::new(48000, opus_channels)?; // Opus always decodes at 48kHz
+        
+        let file_size = packet_reader.seek_bytes(SeekFrom::End(0))?;
+        packet_reader.seek_bytes(SeekFrom::Start(file_size - 1024))?;
+
+        let mut final_granule_pos = None;
+        loop {
+            match packet_reader.read_packet() {
+                Ok(Some(packet)) => {
+                    final_granule_pos = Some(packet.absgp_page()); // granule pos of this packet
+                }
+                Ok(None) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let total_samples = final_granule_pos.unwrap_or(0);
 
         Ok(OpusTrack {
             packet_reader,
@@ -281,6 +344,7 @@ impl OpusTrack {
             channels: channels as u32,
             pre_skip,
             samples_decoded: 0,
+            total_samples: total_samples,
         })
     }
 
@@ -358,6 +422,15 @@ impl AudioDecoder {
             AudioDecoder::Mp3(track) => track.sample_rate as usize,
             AudioDecoder::Vorbis(track) => track.sample_rate as usize,
             AudioDecoder::Opus(track) => track.sample_rate as usize,
+        }
+    }
+
+    pub fn total_samples(&self) -> usize {
+        match self {
+            AudioDecoder::Flac(track) => track.total_samples as usize,
+            AudioDecoder::Mp3(track) => track.total_samples as usize,
+            AudioDecoder::Vorbis(track) => track.total_samples as usize,
+            AudioDecoder::Opus(track) => track.total_samples as usize,
         }
     }
 

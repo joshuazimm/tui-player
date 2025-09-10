@@ -35,7 +35,7 @@ impl Widget for Label {
     }
 
     fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width, area.height);
+        let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width.saturating_add(1), area.height.saturating_add(1));
 
         // truncate + ellipsis if text does not fit
         let mut display_text = self.text.clone();
