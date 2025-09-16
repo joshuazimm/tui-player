@@ -1,20 +1,41 @@
-// TODO: Since this will be a commonly repeated filetype
-//       consider making autogen or at least templating
-//       common parts of the code
 use crossterm::style::Color;
 use crate::widget::{AbsRect, Widget, Cell};
+use crate::state::{GlobalState, StateKey, StateValue};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Label {
     pub text: String,
     pub align_center: bool,
     pub rainbow: bool,
     pub tick: usize,
+    needs_render: AtomicBool,
+    subscribed_keys: Vec<StateKey>,
 }
 
 impl Label {
+    pub fn new(text: String, align_center: bool, rainbow: bool) -> Self {
+        Self {
+            text,
+            align_center,
+            rainbow,
+            tick: 0,
+            needs_render: AtomicBool::new(true),
+            subscribed_keys: Vec::new(),
+        }
+    }
+
+    pub fn with_subscription(mut self, keys: Vec<StateKey>) -> Self {
+        self.subscribed_keys = keys;
+        self
+    }
+
     pub fn set_text(&mut self, new_text: impl Into<String>) {
-        self.text = new_text.into();
+        let new_text = new_text.into();
+        if self.text != new_text {
+            self.text = new_text;
+            self.needs_render.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -30,14 +51,15 @@ fn rainbow_color(i: usize) -> Color {
 }
 
 impl Widget for Label {
-    fn update(&mut self) {
+    fn update(&mut self, _state: &GlobalState) {
         self.tick = self.tick.wrapping_add(1);
     }
 
     fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width.saturating_add(1), area.height.saturating_add(1));
+        let abs_width = area.width.saturating_add(1);
+        let abs_height = area.height.saturating_add(1);
 
-        // truncate + ellipsis if text does not fit
+        // Truncate + ellipsis if text doesn't fit
         let mut display_text = self.text.clone();
         if display_text.len() > abs_width as usize {
             if abs_width > 1 {
@@ -50,13 +72,13 @@ impl Widget for Label {
 
         // Horizontal positioning
         let x_start = if self.align_center {
-            abs_x as usize + (abs_width as usize).saturating_sub(display_text.len()) / 2
+            area.x as usize + (abs_width as usize).saturating_sub(display_text.len()) / 2
         } else {
-            abs_x as usize
+            area.x as usize
         };
         
         // Vertical positioning (always center)
-        let y = abs_y as usize + abs_height as usize / 2;
+        let y = area.y as usize + abs_height as usize / 2;
 
         // Render text
         if self.rainbow {
@@ -78,5 +100,40 @@ impl Widget for Label {
         }
 
         Ok(())
+    }
+
+    fn needs_render(&self) -> bool {
+        self.needs_render.load(Ordering::Relaxed)
+    }
+
+    fn mark_rendered(&mut self) {
+        self.needs_render.store(false, Ordering::Relaxed);
+    }
+
+    fn handle_state_change(&mut self, key: &StateKey, value: &StateValue) {
+        match key {
+            StateKey::CurrentTrackTitle => {
+                if let Some(title) = value.as_string() {
+                    self.set_text(title);
+                }
+            }
+            StateKey::CurrentTrackArtist => {
+                if let Some(artist) = value.as_string() {
+                    self.set_text(artist);
+                }
+            }
+            StateKey::CurrentTrackAlbum => {
+                if let Some(album) = value.as_string() {
+                    self.set_text(album);
+                }
+            }
+            _ => {
+                self.needs_render.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn subscribed_keys(&self) -> Vec<StateKey> {
+        self.subscribed_keys.clone()
     }
 }

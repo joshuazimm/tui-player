@@ -14,55 +14,46 @@ pub mod file_list;
 pub mod label;
 pub mod album_art;
 pub mod progress_bar;
-//pub mod scroll_panel;
-//pub mod image;
 
 use crate::widget::{AbsRect, Widget, Cell};
 use enum_dispatch::enum_dispatch;
+use crate::state::{GlobalState, StateKey, StateValue};
 
 pub use controls::Controls;
 pub use file_list::FileList;
 pub use label::Label;
 pub use album_art::AlbumArt;
 pub use progress_bar::ProgressBar;
-//pub use scroll_panel::ScrollPanel;
-//pub use image::ImageWidget;
 
-// This Enum allows common handling of different Widget types
 #[enum_dispatch(Widget)]
-#[derive(Debug, Clone)]
 pub enum WidgetKind {
     Label(Label),
     Controls(Controls),
     FileList(FileList),
     AlbumArt(AlbumArt),
     ProgressBar(ProgressBar),
-    //ScrollPanel(ScrollPanel),
-    //Image(ImageWidget)
 }
 
+// Since enum_dispatch doesn't automatically implement the new trait methods,
+// we need to implement them manually for WidgetKind
 impl WidgetKind {
-    pub fn as_label(&mut self) -> Option<&mut Label> {
-        if let WidgetKind::Label(label) = self {
-            Some(label)
-        } else {
-            None
+    pub fn handle_state_change(&mut self, key: &StateKey, value: &StateValue) {
+        match self {
+            WidgetKind::Controls(w) => w.handle_state_change(key, value),
+            WidgetKind::FileList(w) => w.handle_state_change(key, value),
+            WidgetKind::Label(w) => w.handle_state_change(key, value),
+            WidgetKind::AlbumArt(w) => w.handle_state_change(key, value),
+            WidgetKind::ProgressBar(w) => w.handle_state_change(key, value),
         }
     }
 
-    pub fn as_progress_bar(&mut self) -> Option<&mut ProgressBar> {
-        if let WidgetKind::ProgressBar(progress_bar) = self {
-            Some(progress_bar)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_file_list(&self) -> Option<&FileList> {
-        if let WidgetKind::FileList(file_list) = self {
-            Some(file_list)
-        } else {
-            None
+    pub fn subscribed_keys(&self) -> Vec<StateKey> {
+        match self {
+            WidgetKind::Controls(w) => w.subscribed_keys(),
+            WidgetKind::FileList(w) => w.subscribed_keys(),
+            WidgetKind::Label(w) => w.subscribed_keys(),
+            WidgetKind::AlbumArt(w) => w.subscribed_keys(),
+            WidgetKind::ProgressBar(w) => w.subscribed_keys(),
         }
     }
 }

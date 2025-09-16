@@ -1,12 +1,13 @@
 use crate::widget::{AbsRect, Widget, Cell};
+use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::style::Color;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-const PADDING: usize = 2;
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ProgressBar {
-    pub progress: f64,
-    pub total: f64,
+    progress: f64,
+    total: f64,
+    needs_render: AtomicBool,
 }
 
 impl ProgressBar {
@@ -14,43 +15,47 @@ impl ProgressBar {
         Self {
             progress: 0.0,
             total: 0.0,
+            needs_render: AtomicBool::new(true),
         }
     }
 
-    pub fn set_progress(&mut self, progress: f64) {
-        self.progress = progress.min(self.total);
-    }
+    fn format_time(seconds: f64) -> String {
+        let total_seconds = seconds.floor() as u64;
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let secs = total_seconds % 60;
 
-    pub fn set_total(&mut self, total: f64) {
-        self.total = total;
-    }
-}
-
-fn format_time(seconds: f64) -> String {
-    let total_seconds = seconds.floor() as u64;
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let secs = total_seconds % 60;
-
-    if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, minutes, secs)
-    } else {
-        format!("{:02}:{:02}", minutes, secs)
+        if hours > 0 {
+            format!("{:02}:{:02}:{:02}", hours, minutes, secs)
+        } else {
+            format!("{:02}:{:02}", minutes, secs)
+        }
     }
 }
 
 impl Widget for ProgressBar {
-    fn update(&mut self) {
+    fn update(&mut self, state: &GlobalState) {
+        // Get current values from state
+        let current_progress = state.playback_position();
+        let current_total = state.track_duration();
+        
+        // Update if changed significantly
+        if (self.progress - current_progress).abs() > 0.1 || self.total != current_total {
+            self.progress = current_progress;
+            self.total = current_total;
+            self.needs_render.store(true, Ordering::Relaxed);
+        }
     }
 
     fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+        const PADDING: usize = 2;
+        
         if area.width.saturating_add(1) <= (PADDING * 2) as u16 {
             return Ok(());
         }
 
-        // Format left and right times
-        let left_time = format_time(self.progress);
-        let right_time = format_time(self.total);
+        let left_time = Self::format_time(self.progress);
+        let right_time = Self::format_time(self.total);
 
         let width = (area.width as usize)
             .saturating_sub(PADDING * 4)
@@ -59,12 +64,7 @@ impl Widget for ProgressBar {
             .saturating_add(1)
             .max(0);
 
-        let frac = if self.total > 0.0 {
-            self.progress / self.total
-        } else {
-            0.0
-        };
-
+        let frac = if self.total > 0.0 { self.progress / self.total } else { 0.0 };
         let filled_len = (frac * width as f64).round() as usize;
         let bar_y = area.y as usize + (area.height.saturating_add(1) as usize / 2);
 
@@ -97,5 +97,39 @@ impl Widget for ProgressBar {
         }
 
         Ok(())
+    }
+
+    fn needs_render(&self) -> bool {
+        self.needs_render.load(Ordering::Relaxed)
+    }
+
+    fn mark_rendered(&mut self) {
+        self.needs_render.store(false, Ordering::Relaxed);
+    }
+
+    fn handle_state_change(&mut self, key: &StateKey, value: &StateValue) {
+        match key {
+            StateKey::PlaybackPosition => {
+                if let Some(pos) = value.as_f64() {
+                    if (self.progress - pos).abs() > 0.1 {
+                        self.progress = pos;
+                        self.needs_render.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            StateKey::TrackDuration => {
+                if let Some(duration) = value.as_f64() {
+                    if self.total != duration {
+                        self.total = duration;
+                        self.needs_render.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn subscribed_keys(&self) -> Vec<StateKey> {
+        vec![StateKey::PlaybackPosition, StateKey::TrackDuration]
     }
 }

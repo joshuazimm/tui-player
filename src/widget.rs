@@ -1,7 +1,7 @@
 use std::io::{Write};
-
 use enum_dispatch::enum_dispatch;
 use crate::widgets::WidgetKind;
+use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::{terminal::size, cursor::MoveTo, style::{SetForegroundColor, SetBackgroundColor, ResetColor, Color}};
 
 #[derive(Clone, Copy)]
@@ -15,10 +15,6 @@ impl Default for Cell {
     fn default() -> Self {
         Self { ch: ' ', fg: None, bg: None }
     }
-}
-
-fn make_screen_buffer(width: u16, height: u16) -> Vec<Vec<Cell>> {
-    vec![vec![Cell::default(); width as usize]; height as usize]
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -43,37 +39,38 @@ impl Default for AbsRect {
 }
 
 impl Rect {
-    // Maps to normalized coords in [0..term_size-1] with clamping
     pub fn to_absolute(&self, term_width: u16, term_height: u16) -> (u16, u16, u16, u16) {
         let max_x_idx = term_width.saturating_sub(1) as f32;
         let max_y_idx = term_height.saturating_sub(1) as f32;
 
-        let mut abs_x = (self.x * max_x_idx).round() as i32;
-        let mut abs_y = (self.y * max_y_idx).round() as i32;
+        let abs_x = (self.x * max_x_idx).round().clamp(0.0, max_x_idx) as u16;
+        let abs_y = (self.y * max_y_idx).round().clamp(0.0, max_y_idx) as u16;
+        
+        let abs_w = (self.width * term_width as f32).round() as u16;
+        let abs_h = (self.height * term_height as f32).round() as u16;
+        
+        let abs_w = abs_w.min(term_width.saturating_sub(abs_x));
+        let abs_h = abs_h.min(term_height.saturating_sub(abs_y));
 
-        if abs_x < 0 { abs_x = 0; }
-        if abs_y < 0 { abs_y = 0; }
-        if abs_x as u32 > term_width as u32 { abs_x = max_x_idx as i32; }
-        if abs_y as u32 > term_height as u32 { abs_y = max_y_idx as i32; }
-
-        let mut abs_w = (self.width * term_width as f32).round() as i32;
-        let mut abs_h = (self.height * term_height as f32).round() as i32;
-
-        let remaining_x = (max_x_idx as i32).saturating_sub(abs_x) + 1;
-        let remaining_y = (max_y_idx as i32).saturating_sub(abs_y) + 1;
-        if abs_w > remaining_x { abs_w = remaining_x; }
-        if abs_h > remaining_y { abs_h = remaining_y; }
-        if abs_w < 0 { abs_w = 0; }
-        if abs_h < 0 { abs_h = 0; }
-
-        (abs_x as u16, abs_y as u16, abs_w as u16, abs_h as u16)
+        (abs_x, abs_y, abs_w, abs_h)
     }
+}
+
+#[enum_dispatch]
+pub trait Widget {
+    fn update(&mut self, state: &GlobalState);
+    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()>;
+    fn needs_render(&self) -> bool;
+    fn mark_rendered(&mut self);
+    fn handle_state_change(&mut self, key: &StateKey, value: &StateValue);
+    fn subscribed_keys(&self) -> Vec<StateKey>;
 }
 
 pub struct Section {
     pub rect: Rect,
     pub abs_rect: AbsRect,
-    pub widget: WidgetKind
+    pub widget: WidgetKind,
+    pub needs_render: bool
 }
 
 impl Section {
@@ -81,51 +78,194 @@ impl Section {
         Self {
             rect,
             abs_rect: AbsRect::default(),
-            widget
+            widget,
+            needs_render: true
         }
     }
-}
-
-#[enum_dispatch]
-pub trait Widget {
-    fn update(&mut self);
-    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()>;
 }
 
 pub struct Layout {
     pub sections: Vec<Section>,
+    last_terminal_size: (u16, u16),
+    last_global_change_id: u64,
+    screen: Vec<Vec<Cell>>, // cached last frame
+    force_full_render: bool, // Flag to force complete re-render
 }
 
 impl Layout {
-    pub fn update_all(&mut self) -> std::io::Result<()> {
+    pub fn new(sections: Vec<Section>) -> Self {
+        let (width, height) = size().unwrap_or((80, 24));
+        Self {
+            sections,
+            last_terminal_size: (width, height),
+            last_global_change_id: 0,
+            screen: make_screen_buffer(width, height),
+            force_full_render: true, // Start with a full render
+        }
+    }
+
+    pub fn init_all(&mut self, _state: &GlobalState) {
+    }
+
+    pub fn update_all(&mut self, state: &GlobalState) -> std::io::Result<()> {
+        // Check if terminal size changed
+        if let Ok((width, height)) = size() {
+            if (width, height) != self.last_terminal_size {
+                self.last_terminal_size = (width, height);
+                state.update_terminal_size();
+                self.screen = make_screen_buffer(width, height);
+                self.force_full_render = true;
+                for section in &mut self.sections {
+                    section.needs_render = true;
+                }
+            }
+        }
+
+        // Get current change ID
+        let current_change_id = state.change_id();
+        let state_changed = current_change_id != self.last_global_change_id;
+        
+        if state_changed {
+            // Get all changes and distribute them to interested widgets
+            let changes = state.take_changes();
+            
+            for change_key in &changes {
+                if let Some(value) = state.get(change_key) {
+                    // Send changes to widgets that care about this key
+                    for section in &mut self.sections {
+                        if section.widget.subscribed_keys().contains(change_key) {
+                            section.widget.handle_state_change(change_key, &value);
+                            section.needs_render = true;
+                        }
+                    }
+                }
+            }
+            
+            self.last_global_change_id = current_change_id;
+        }
+
+        // Update all widgets
         for section in &mut self.sections {
-            section.widget.update();
+            section.widget.update(state);
+            
+            // Update absolute rect based on current terminal size
+            let (term_w, term_h) = self.last_terminal_size;
+            let (abs_x, abs_y, abs_w, abs_h) = section.rect.to_absolute(term_w, term_h);
+            section.abs_rect = AbsRect {
+                x: abs_x.saturating_add(1),
+                y: abs_y.saturating_add(1),
+                width: abs_w.saturating_sub(2).max(0),
+                height: abs_h.saturating_sub(2).max(0),
+            };
+            
+            // Check if widget needs render
+            if section.widget.needs_render() {
+                section.needs_render = true;
+                section.widget.mark_rendered();
+            }
         }
         Ok(())
     }
 
-    pub fn render_all(&mut self, out: &mut std::io::Stdout) -> std::io::Result<()> {
+    pub fn render_all(&mut self, out: &mut std::io::Stdout, force_render: bool) -> std::io::Result<()> {
         let (term_w, term_h) = size().unwrap();
-        let mut screen = make_screen_buffer(term_w, term_h);
-
-        // TODO: optimize by only recalculating borders on screen or widget resize
-        self.draw_unified_borders(&mut screen, term_w, term_h);
-
-        for section in self.sections.iter_mut() {
-            section.widget.render(&section.abs_rect, &mut screen)?;
+        
+        // Check for terminal resize - this forces a complete re-render
+        if (term_w, term_h) != self.last_terminal_size {
+            self.last_terminal_size = (term_w, term_h);
+            return self.force_render_all(out);
         }
 
-        Self::flush_buffer(out, &screen)
+        // Check if any rendering is needed
+        let any_needs_render = force_render || self.force_full_render || 
+                             self.sections.iter().any(|s| s.needs_render);
+        
+        if !any_needs_render {
+            return Ok(());
+        }
+
+        // Use force render for complete re-renders
+        if self.force_full_render || force_render {
+            return self.force_render_all(out);
+        }
+
+        // Partial render: only update changed sections
+        let areas_to_clear: Vec<Rect> = self.sections.iter()
+            .filter(|s| s.needs_render)
+            .map(|s| s.rect)
+            .collect();
+
+        if areas_to_clear.is_empty() {
+            return Ok(());
+        }
+
+        // Clear areas that need updating
+        for area_rect in &areas_to_clear {
+            self.clear_rect_area(area_rect, term_w, term_h);
+        }
+
+        // Redraw borders (they may have been cleared)
+        self.draw_unified_borders(term_w, term_h);
+
+        // Render only the widgets that need updating
+        for section in self.sections.iter_mut() {
+            if section.needs_render {
+                section.widget.render(&section.abs_rect, &mut self.screen)?;
+                section.needs_render = false;
+            }
+        }
+
+        Self::flush_buffer(out, &self.screen)
     }
 
-    /*
-    This function:
-      - collects floats edges in normalized space
-      - greedily merges edges within `epsilon`
-      - maps merged edges to cell indices (0..term_size-1)
-      - rebuilds snapped absolute rects and draws borders (inclusive)
-    */
-    fn draw_unified_borders(&mut self, buf: &mut [Vec<Cell>], term_width: u16, term_height: u16) {
+    pub fn force_render_all(&mut self, out: &mut std::io::Stdout) -> std::io::Result<()> {
+        let (term_w, term_h) = size().unwrap();
+        
+        // Only recreate screen buffer if size actually changed
+        if (term_w, term_h) != (self.screen[0].len() as u16, self.screen.len() as u16) {
+            self.screen = make_screen_buffer(term_w, term_h);
+        } else {
+            // Just clear the existing buffer
+            for row in &mut self.screen {
+                for cell in row {
+                    *cell = Cell::default();
+                }
+            }
+        }
+
+        // Update terminal size and mark all widgets for render
+        self.last_terminal_size = (term_w, term_h);
+        for section in &mut self.sections {
+            section.needs_render = true;
+        }
+
+        // Draw borders first
+        self.draw_unified_borders(term_w, term_h);
+
+        // Render all widgets
+        for section in self.sections.iter_mut() {
+            section.widget.render(&section.abs_rect, &mut self.screen)?;
+            section.needs_render = false;
+        }
+
+        self.force_full_render = false;
+        Self::flush_buffer(out, &self.screen)
+    }
+
+    fn clear_rect_area(&mut self, rect: &Rect, term_width: u16, term_height: u16) {
+        let (abs_x, abs_y, abs_w, abs_h) = rect.to_absolute(term_width, term_height);
+
+        for y in abs_y..(abs_y + abs_h).min(self.screen.len() as u16) {
+            for x in abs_x..(abs_x + abs_w).min(self.screen[0].len() as u16) {
+                self.screen[y as usize][x as usize] = Cell::default();
+            }
+        }
+    }
+
+    fn draw_unified_borders(&mut self, term_width: u16, term_height: u16) {
+        // use the internal cached buffer directly to avoid overlapping borrows
+        let buf = &mut self.screen;
+
         let mut xs_f = Vec::new();
         let mut ys_f = Vec::new();
 
@@ -136,14 +276,12 @@ impl Layout {
             ys_f.push(section.rect.y + section.rect.height);
         }
 
-        // epsilon is in normalized units (0.0..1.0). 0.02 ~ 2% of terminal dimension.
         let epsilon = 0.02_f32;
         let xs = unify_edges(&xs_f, term_width, epsilon);
         let ys = unify_edges(&ys_f, term_height, epsilon);
 
-        // Collect all border edges that need to be drawn
-        let mut horizontal_edges: Vec<(u16, u16, u16)> = Vec::new(); // (y, x_start, x_end) inclusive
-        let mut vertical_edges: Vec<(u16, u16, u16)> = Vec::new();   // (x, y_start, y_end) inclusive
+        let mut horizontal_edges: Vec<(u16, u16, u16)> = Vec::new();
+        let mut vertical_edges: Vec<(u16, u16, u16)> = Vec::new();
         let mut intersections = std::collections::HashSet::new();
 
         let max_x = term_width.saturating_sub(1);
@@ -154,17 +292,14 @@ impl Layout {
 
             if abs_w == 0 || abs_h == 0 { continue; }
 
-            // Convert width/height counts to inclusive indices for right/bottom
             let right_idx = abs_x.saturating_add(abs_w.saturating_sub(1));
             let bottom_idx = abs_y.saturating_add(abs_h.saturating_sub(1));
 
-            // Snap edges to nearest unified positions (or keep within bounds)
             let left = nearest(abs_x, &xs, max_x);
             let right = nearest(right_idx, &xs, max_x);
             let top = nearest(abs_y, &ys, max_y);
             let bottom = nearest(bottom_idx, &ys, max_y);
 
-            // Compute inner area (the widget area inside the borders).
             let inner_width = if right > left + 2 { right - left - 2 } else { 0 };
             let inner_height = if bottom > top + 2 { bottom - top - 2 } else { 0 };
 
@@ -175,7 +310,6 @@ impl Layout {
                 height: inner_height,
             };
 
-            // Save border line segments (top bottom left right)
             if top <= max_y && left <= max_x && right <= max_x && left <= right {
                 horizontal_edges.push((top, left, right));
             }
@@ -189,28 +323,26 @@ impl Layout {
                 vertical_edges.push((right, top, bottom));
             }
 
-            // Add corner intersections from snapped coords
             intersections.insert((left, top));
             intersections.insert((right, top));
             intersections.insert((left, bottom));
             intersections.insert((right, bottom));
         }
 
-        // Draw horizontal edges (inclusive)
+        // Draw edges
         for (y, x_start, x_end) in &horizontal_edges {
             if *y <= max_y {
                 draw_horizontal(buf, *y as usize, *x_start as usize, *x_end as usize, '─');
             }
         }
 
-        // Draw vertical edges (inclusive)
         for (x, y_start, y_end) in &vertical_edges {
             if *x <= max_x {
                 draw_vertical(buf, *x as usize, *y_start as usize, *y_end as usize, '│');
             }
         }
 
-        // Draw intersections/corners using the drawn lines to determine the correct corner char
+        // Draw corner characters
         for (x, y) in intersections {
             if x <= max_x && y <= max_y {
                 let corner_char = get_corner_character(buf, x, y);
@@ -246,11 +378,14 @@ impl Layout {
     }
 }
 
+fn make_screen_buffer(width: u16, height: u16) -> Vec<Vec<Cell>> {
+    vec![vec![Cell::default(); width as usize]; height as usize]
+}
+
 fn get_corner_character(buf: &[Vec<Cell>], x: u16, y: u16) -> char {
     let (w, h) = (buf[0].len() as i32, buf.len() as i32);
     let (x, y) = (x as i32, y as i32);
 
-    // Helper to check if neighbor has a line char
     let is_line = |cx: i32, cy: i32| {
         if cx < 0 || cy < 0 || cx >= w || cy >= h {
             return false;
@@ -259,24 +394,24 @@ fn get_corner_character(buf: &[Vec<Cell>], x: u16, y: u16) -> char {
             '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼')
     };
 
-    let up    = is_line(x, y - 1);
-    let down  = is_line(x, y + 1);
-    let left  = is_line(x - 1, y);
+    let up = is_line(x, y - 1);
+    let down = is_line(x, y + 1);
+    let left = is_line(x - 1, y);
     let right = is_line(x + 1, y);
 
     match (up, down, left, right) {
-        (true,  true,  true,  true ) => '┼',
-        (false, true,  true,  true ) => '┬',
-        (true,  false, true,  true ) => '┴',
-        (true,  true,  false, true ) => '├',
-        (true,  true,  true,  false) => '┤',
-        (false, false, true,  true ) => '─',
-        (true,  true,  false, false) => '│',
-        (false, true,  false, true ) => '┌',
-        (false, true,  true,  false) => '┐',
-        (true,  false, false, true ) => '└',
-        (true,  false, true,  false) => '┘',
-        _ => ' ', // no connections
+        (true, true, true, true) => '┼',
+        (false, true, true, true) => '┬',
+        (true, false, true, true) => '┴',
+        (true, true, false, true) => '├',
+        (true, true, true, false) => '┤',
+        (false, false, true, true) => '─',
+        (true, true, false, false) => '│',
+        (false, true, false, true) => '┌',
+        (false, true, true, false) => '┐',
+        (true, false, false, true) => '└',
+        (true, false, true, false) => '┘',
+        _ => ' ',
     }
 }
 
@@ -297,7 +432,6 @@ fn unify_edges(edges: &[f32], term_size: u16, epsilon: f32) -> Vec<u16> {
         if (e - last).abs() <= epsilon {
             current_group.push(e);
         } else {
-            // snap group -> average position, then map to cell index 0..term_size-1
             let avg = current_group.iter().sum::<f32>() / current_group.len() as f32;
             let mapped = (avg * (term_size.saturating_sub(1) as f32)).round() as u16;
             snapped.push(mapped);
@@ -306,7 +440,6 @@ fn unify_edges(edges: &[f32], term_size: u16, epsilon: f32) -> Vec<u16> {
         }
     }
 
-    // flush last group
     if !current_group.is_empty() {
         let avg = current_group.iter().sum::<f32>() / current_group.len() as f32;
         let mapped = (avg * (term_size.saturating_sub(1) as f32)).round() as u16;
@@ -318,7 +451,6 @@ fn unify_edges(edges: &[f32], term_size: u16, epsilon: f32) -> Vec<u16> {
     snapped
 }
 
-// Find nearest unified coordinate to val, clamped to max_index when unified is empty
 fn nearest(val: u16, unified: &[u16], max_index: u16) -> u16 {
     if unified.is_empty() {
         return val.min(max_index);

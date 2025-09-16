@@ -1,47 +1,27 @@
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
-};
 use std::thread;
 use std::time::Duration;
+use crate::state::GlobalState;
 
 pub struct KeyHandler {
-    pub should_quit: Arc<AtomicBool>,
-    pub is_paused: Arc<AtomicBool>,
-    pub volume: Arc<AtomicU32>,
-    pub selected_index: Arc<AtomicU32>,
-    pub enter_pressed: Arc<AtomicBool>,
+    state: GlobalState,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl KeyHandler {
-    pub fn new(
-        is_paused: Arc<AtomicBool>,
-        volume: Arc<AtomicU32>,
-        selected_index: Arc<AtomicU32>,
-        enter_pressed: Arc<AtomicBool>,
-    ) -> Self {
+    pub fn new(state: GlobalState) -> Self {
         Self {
-            should_quit: Arc::new(AtomicBool::new(false)),
-            is_paused,
-            volume,
-            selected_index,
-            enter_pressed,
+            state,
             handle: None,
         }
     }
 
     pub fn start(&mut self) {
-        let should_quit = Arc::clone(&self.should_quit);
-        let is_paused = Arc::clone(&self.is_paused);
-        let volume = Arc::clone(&self.volume);
-        let selected_index = Arc::clone(&self.selected_index);
-        let enter_pressed = Arc::clone(&self.enter_pressed);
+        let state = self.state.clone();
 
         let handle = thread::spawn(move || {
             loop {
-                if should_quit.load(Ordering::Relaxed) {
+                if state.should_quit() {
                     break;
                 }
 
@@ -51,32 +31,33 @@ impl KeyHandler {
                         if key_event.kind == KeyEventKind::Press {
                             match key_event.code {
                                 KeyCode::Char('q') => {
-                                    should_quit.store(true, Ordering::Relaxed);
+                                    state.set_should_quit(true);
                                 }
-                                KeyCode::Up | KeyCode::Char('j') => {
-                                    selected_index.fetch_sub(1, Ordering::Relaxed);
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    // Signal that we want to move up
+                                    use crate::state::{StateKey, StateValue};
+                                    state.set(StateKey::NavigationUp, StateValue::Bool(true));
                                 }
-                                KeyCode::Down | KeyCode::Char('k') => {
-                                    selected_index.fetch_add(1, Ordering::Relaxed);
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    // Signal that we want to move down
+                                    use crate::state::{StateKey, StateValue};
+                                    state.set(StateKey::NavigationDown, StateValue::Bool(true));
                                 }
                                 KeyCode::Char(' ') => {
-                                    let current = is_paused.load(Ordering::Relaxed);
-                                    is_paused.store(!current, Ordering::Relaxed);
+                                    let is_playing = state.is_playing();
+                                    state.set_playing(!is_playing);
                                 }
                                 KeyCode::Char('+') | KeyCode::Char('=') => {
-                                    let current_vol =
-                                        f32::from_bits(volume.load(Ordering::Relaxed));
-                                    let new_vol = (current_vol + 0.01).min(1.0);
-                                    volume.store(new_vol.to_bits(), Ordering::Relaxed);
+                                    let current_vol = state.volume();
+                                    state.set_volume((current_vol + 0.01).min(1.0));
                                 }
                                 KeyCode::Char('-') | KeyCode::Char('_') => {
-                                    let current_vol =
-                                        f32::from_bits(volume.load(Ordering::Relaxed));
-                                    let new_vol = (current_vol - 0.01).max(0.0);
-                                    volume.store(new_vol.to_bits(), Ordering::Relaxed);
+                                    let current_vol = state.volume();
+                                    state.set_volume((current_vol - 0.01).max(0.0));
                                 }
                                 KeyCode::Enter => {
-                                    enter_pressed.store(true, Ordering::Relaxed);
+                                    use crate::state::{StateKey, StateValue};
+                                    state.set(StateKey::TrackSelected, StateValue::Bool(true));
                                 }
                                 _ => {}
                             }
@@ -89,16 +70,10 @@ impl KeyHandler {
         self.handle = Some(handle);
     }
 
-    pub fn should_quit(&self) -> bool {
-        self.should_quit.load(Ordering::Relaxed)
-    }
-
     pub fn stop(self) {
-        // Signal the thread to stop
-        self.should_quit.store(true, Ordering::Relaxed);
+        self.state.set_should_quit(true);
         if let Some(handle) = self.handle {
             let _ = handle.join();
         }
     }
 }
-

@@ -4,8 +4,6 @@ use std::io::Write;
 use std::io::stdout;
 use std::path::PathBuf;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     mpsc::Receiver,
 };
 use std::thread;
@@ -22,6 +20,8 @@ mod keyhandler;
 use keyhandler::KeyHandler;
 mod decoder;
 use decoder::{decoder_from_path};
+mod state;
+use state::{GlobalState, StateKey};
 
 // external includes
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -80,8 +80,7 @@ fn process_audio_chunks<F, C>(
                     .collect();
                 interleave_and_push(&output_vecs, out_written, prod);
             }
-        }
-        else {
+        } else {
             thread::sleep(Duration::from_millis(50));
         }
 
@@ -91,13 +90,13 @@ fn process_audio_chunks<F, C>(
     }
 }
 
+// Audio processing remains mostly the same but now updates global state
 fn audio_thread(
     initial_path: PathBuf,
     mut prod: ringbuf::HeapProd<f32>,
     device_rate: usize,
     track_rx: Receiver<PathBuf>,
-    frame_counter: Arc<AtomicU64>,
-    total_samples_counter: Arc<AtomicU64>,
+    state: GlobalState,
 ) {
     let chunk_size = 4096;
     let sub_chunks = 1;
@@ -120,23 +119,23 @@ fn audio_thread(
                 )
                 .expect("Failed to write to output.txt");
                 
-                // Wait for a new path and retry
                 match track_rx.recv() {
                     Ok(new_path) => {
                         current_path = new_path;
                         continue;
                     }
-                    Err(_) => return, // Channel closed
+                    Err(_) => return,
                 }
             }
         };
         
         let channels = decoder.channels();
         let file_rate = decoder.sample_rate();
-        total_samples_counter.store(
-            (decoder.total_samples() as f64 / decoder.sample_rate() as f64).to_bits(),
-            Ordering::Relaxed,
-        );
+        
+        // Update state instead of atomic counters
+        let duration_seconds = decoder.total_samples() as f64 / decoder.sample_rate() as f64;
+        state.set_track_duration(duration_seconds);
+        state.set_current_track(current_path.clone(), None, None, None);
 
         let resampler = SimpleResampler::new(
             ResamplerKind::Fast,
@@ -177,7 +176,7 @@ fn audio_thread(
             || -> bool {
                 if let Ok(new_path) = track_rx.try_recv() {
                     current_path = new_path;
-                    frame_counter.store(0, Ordering::Relaxed);
+                    state.set_playback_position(0.0); // Reset position for new track
                     true
                 } else {
                     false
@@ -202,11 +201,6 @@ fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<
     }
 }
 
-fn get_playback_time(counter: &AtomicU64, sample_rate: u64) -> f64 {
-    let frames = counter.load(Ordering::Relaxed);
-    frames as f64 / sample_rate as f64
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / 60); // 60 FPS
 
@@ -214,16 +208,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal::enable_raw_mode()?;
     execute!(out, EnterAlternateScreen, Hide)?;
 
+    // Initialize global state
+    let state = GlobalState::new();
+
     let (track_tx, track_rx) = std::sync::mpsc::channel::<PathBuf>();
-
-    let volume = Arc::new(AtomicU32::new(0.05f32.to_bits()));
-    let vol_state = Arc::clone(&volume);
-
-    let is_paused = Arc::new(AtomicBool::new(false));
-    let mut last_paused_state = false;
-
-    let select_index = Arc::new(AtomicU32::new(0));
-    let enter_pressed = Arc::new(AtomicBool::new(false));
 
     let host = cpal::default_host();
     let device = host.default_output_device().unwrap();
@@ -236,192 +224,167 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let device_rate = wanted_config.sample_rate().0 as usize;
 
-    // TODO: change buffer size based on number of output channels
     let rb = HeapRb::<f32>::new(device_rate * 2);
     let (prod, mut cons): (HeapProd<f32>, HeapCons<f32>) = rb.split();
 
-    let file_list = FileList::new(PathBuf::from("test-tracks"), Arc::clone(&select_index));
+    // Create widgets with simplified constructors
+    let file_list = FileList::new(PathBuf::from("test-tracks/Woodland"), state.clone());
+    let controls = Controls::new();
+    let progress_bar = ProgressBar::new();
+    let album_art = AlbumArt::new(false);
+    let track_title_label = Label::new("No Track".to_string(), true, false)
+        .with_subscription(vec![StateKey::CurrentTrackTitle]);
 
-    // Define view layout
-    // TODO: Move to separate config file & add xml parsing
-    let mut layout = Layout {
-        sections: vec![
-            Section::new(
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.3,
-                    height: 0.5,
-                },
-                WidgetKind::FileList(file_list),
-            ),
-            Section::new(
-                Rect {
-                    x: 0.0,
-                    y: 0.5,
-                    width: 0.3,
-                    height: 0.2,
-                },
-                WidgetKind::Label(Label {
-                    text: "Test Circle Test Circle Test Circle".into(),
-                    align_center: true,
-                    rainbow: true,
-                    tick: 0,
-                }),
-            ),
-            Section::new(
-                Rect {
-                    x: 0.0,
-                    y: 0.7,
-                    width: 0.3,
-                    height: 0.2,
-                },
-                WidgetKind::Controls(Controls::new(Arc::clone(&is_paused), Arc::clone(&volume))),
-            ),
-            Section::new(
-                Rect {
-                    x: 0.0,
-                    y: 0.9,
-                    width: 1.0,
-                    height: 0.1,
-                },
-                WidgetKind::ProgressBar(ProgressBar::new()),
-            ),
-            Section::new(
-                Rect {
-                    x: 0.3,
-                    y: 0.0,
-                    width: 0.7,
-                    height: 0.9,
-                },
-                WidgetKind::AlbumArt(AlbumArt::new(false)),
-            ),
-        ],
-    };
+    // Create layout with updated sections
+    let sections = vec![
+        Section::new(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.3,
+                height: 0.5,
+            },
+            WidgetKind::FileList(file_list),
+        ),
+        Section::new(
+            Rect {
+                x: 0.0,
+                y: 0.5,
+                width: 0.3,
+                height: 0.2,
+            },
+            WidgetKind::Label(track_title_label),
+        ),
+        Section::new(
+            Rect {
+                x: 0.0,
+                y: 0.7,
+                width: 0.3,
+                height: 0.2,
+            },
+            WidgetKind::Controls(controls),
+        ),
+        Section::new(
+            Rect {
+                x: 0.0,
+                y: 0.9,
+                width: 1.0,
+                height: 0.1,
+            },
+            WidgetKind::ProgressBar(progress_bar),
+        ),
+        Section::new(
+            Rect {
+                x: 0.3,
+                y: 0.0,
+                width: 0.7,
+                height: 0.9,
+            },
+            WidgetKind::AlbumArt(album_art),
+        ),
+    ];
 
-    // Spawn keyhandler
-    let mut key_handler = KeyHandler::new(
-        Arc::clone(&is_paused),
-        Arc::clone(&volume),
-        Arc::clone(&select_index),
-        Arc::clone(&enter_pressed),
-    );
+    let mut layout = Layout::new(sections);
+    
+    // Initialize all widgets with state (this sets up subscriptions)
+    layout.init_all(&state);
+
+    // Spawn unified key handler
+    let mut key_handler = KeyHandler::new(state.clone());
     key_handler.start();
 
-    let frame_counter = Arc::new(AtomicU64::new(0));
-    let counter_clone = frame_counter.clone();
-    let counter_clone_2 = frame_counter.clone();
+    let state_clone = state.clone();
 
-    let total_samples = Arc::new(AtomicU64::new(0));
-    let total_samples_clone = total_samples.clone();
-    let total_samples_clone_2 = total_samples.clone();
-
-    // Spawn decoder
-    // TODO: separate track header collection from decoding for up or downmixing
-    //       channels. (Stereo -> Mono, 5.1 -> Stereo, etc)
+    // Spawn decoder thread
     thread::spawn(move || {
+        // Wait for initial track to be selected
         if let Ok(path) = track_rx.recv() {
-            audio_thread(path, prod, device_rate, track_rx, frame_counter, total_samples_clone);
+            audio_thread(path, prod, device_rate, track_rx, state_clone);
         }
     });
 
-    // CPAL output
+    // CPAL output with state integration
     let mut last_sample = 0.0f32;
     let channels = wanted_config.channels() as u64;
+    let state_for_audio = state.clone();
+    let mut frames_played = 0u64;
     
     let stream = device.build_output_stream(
         &wanted_config.into(),
         move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
             let mut consumed_any = false;
 
-            for sample in output.iter_mut() {
-                if let Some(s) = cons.try_pop() {
-                    last_sample = s;
-                    consumed_any = true;
+            // Check if we should be playing
+            if state_for_audio.is_playing() {
+                for sample in output.iter_mut() {
+                    if let Some(s) = cons.try_pop() {
+                        last_sample = s;
+                        consumed_any = true;
+                    }
+                    let vol = state_for_audio.volume();
+                    *sample = (last_sample * vol).clamp(-1.0, 1.0);
                 }
-                let vol = f32::from_bits(vol_state.load(Ordering::Relaxed));
-                *sample = (last_sample * vol).clamp(-1.0, 1.0);
-            }
 
-            if consumed_any {
-                let frames_written = (output.len() as u64) / channels;
-                counter_clone.fetch_add(frames_written, Ordering::Relaxed);
+                if consumed_any {
+                    let frames_written = (output.len() as u64) / channels;
+                    frames_played += frames_written;
+                    
+                    // Update playback position in state
+                    let position = frames_played as f64 / device_rate as f64;
+                    state_for_audio.set_playback_position(position);
+                }
+            } else {
+                // Paused - output silence
+                for sample in output.iter_mut() {
+                    *sample = 0.0;
+                }
             }
         },
         |err| eprintln!("Stream error: {:?}", err),
         None,
     )?;
+    
     stream.play()?;
 
-    // Spin sleeper sleeps for the bulk of the allocated wait time,
-    // then spins (busy waits) for the last few microseconds to get 
-    // better accuracy
     let sleeper = SpinSleeper::default();
     let mut next_frame = Instant::now();
     let mut last_resync = Instant::now();
 
-    // Main view loop
+    // Main render loop - much simpler now!
     loop {
-        if key_handler.should_quit() {
+        if state.should_quit() {
             break;
         }
 
-        let pause = is_paused.load(Ordering::Relaxed);
-        if pause != last_paused_state {
-            if pause {
-                stream.pause()?;
-            } else {
-                stream.play()?;
-            }
-            last_paused_state = pause;
-        }
+        // Update terminal size in state
+        state.update_terminal_size();
 
-        let new_track = enter_pressed.load(Ordering::Relaxed);
-        if new_track {
-            let index = select_index.load(Ordering::Relaxed);
-            if let Some(file_list) = layout.sections.iter().find_map(|section| section.widget.as_file_list()) {
-                if let Some(path_str) = file_list.get_file_from_index(index) {
-                    let mut path = file_list.get_path();
-                    path.push(path_str);
-                    let _ = track_tx.send(path);
-                    enter_pressed.store(false, Ordering::Relaxed);
-                }
-            }
-        }
-
-        if let Some(progress_bar) = layout.sections.iter_mut().find_map(|section| section.widget.as_progress_bar()) {
-            let secs = get_playback_time(&counter_clone_2, device_rate as u64);
-            let total = f64::from_bits(total_samples_clone_2.load(Ordering::Relaxed));
-            //print!("{}", total);
-            progress_bar.set_progress(secs);
-            progress_bar.set_total(total);
-        }
-
-        // I imagine we'll want to throttle updates depending on
-        // the widget at some point so this is just for convenience
-
-        // TODO: We should define a pubsub system for widgets, where
-        // widgets are rendered only when a state they care about changes
-        // (e.g. volume, track name, etc)
-        // I think we may also want to consider moving updates into a
-        // separate thread while still keeping it event driven and change
-        // widget states to be shared between render and update threads.
-        layout.update_all()?;
-        layout.render_all(&mut out)?;
+        // Update widgets/state
+        layout.update_all(&state)?;
         
-        // Frame pacing for target FPS
+        // If UI requested a track change, forward current path to audio thread
+        if state.get(&StateKey::NewTrackRequested).and_then(|v| v.as_bool()) == Some(true) {
+            if let Some(path) = state.current_track_path() {
+                // Ignore send errors (audio thread may have exited)
+                let _ = track_tx.send(path);
+            }
+            state.set_new_track_requested(false);
+        }
+
+        // Only render if something actually changed
+        layout.render_all(&mut out, false)?;
+        
+        // Frame pacing
         next_frame += FRAME_TIME;
         let now = Instant::now();
 
         if next_frame > now {
             sleeper.sleep(next_frame - now);
         } else {
-            // Running behind, catch up
             next_frame = now;
         }
 
-        // Periodic resync every ~2 seconds to avoid long-term drift 
-        // and overflow in next_frame
+        // Periodic resync
         if last_resync.elapsed() >= Duration::from_secs(2) {
             next_frame = Instant::now();
             last_resync = next_frame;

@@ -1,43 +1,60 @@
 use crate::widget::{AbsRect, Widget, Cell};
-use std::sync::{Arc, atomic::{AtomicU32, Ordering, AtomicBool}};
+use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::style::Color;
-use unicode_width::UnicodeWidthStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Controls {
-    pub is_paused: Arc<AtomicBool>,
-    pub volume: Arc<AtomicU32>,
     cached_text: String,
+    needs_render: AtomicBool,
+    is_paused: bool,
+    volume: f32,
 }
 
 impl Controls {
-    pub fn new(is_paused: Arc<AtomicBool>, volume: Arc<AtomicU32>) -> Self {
+    pub fn new() -> Self {
         Self {
-            is_paused,
-            volume,
             cached_text: String::new(),
+            needs_render: AtomicBool::new(true),
+            is_paused: false,
+            volume: 0.05,
+        }
+    }
+
+    fn update_cached_text(&mut self) {
+        let new_text = format!(
+            "{}  |  Vol: {:.0}%",
+            if self.is_paused { "▶ Play" } else { "⏸ Pause" },
+            self.volume * 100.0
+        );
+        
+        if self.cached_text != new_text {
+            self.cached_text = new_text;
+            self.needs_render.store(true, Ordering::Relaxed);
         }
     }
 }
 
 impl Widget for Controls {
-    fn update(&mut self) {
-        let paused = self.is_paused.load(Ordering::Relaxed);
-        let vol = f32::from_bits(self.volume.load(Ordering::Relaxed)) * 100.0;
-
-        self.cached_text = format!(
-            "{}  |  Vol: {:.0}%",
-            if paused { "▶ Play" } else { "⏸ Pause" },
-            vol
-        );
+    fn update(&mut self, state: &GlobalState) {
+        // Get current state values
+        let current_paused = state.is_paused();
+        let current_volume = state.volume();
+        
+        // Update if changed
+        if self.is_paused != current_paused || (self.volume - current_volume).abs() > 0.01 {
+            self.is_paused = current_paused;
+            self.volume = current_volume;
+            self.update_cached_text();
+        }
     }
 
     fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
-        let (abs_x, abs_y, abs_width, abs_height) = (area.x, area.y, area.width, area.height);
-        let y = abs_y as usize + (abs_height as usize / 2);
-
+        use unicode_width::UnicodeWidthStr;
+        
+        let y = area.y as usize + (area.height as usize / 2);
         let text_width = UnicodeWidthStr::width(self.cached_text.as_str());
-        let x = abs_x as usize + (abs_width as usize).saturating_sub(text_width) / 2;
+        let x = area.x as usize + (area.width as usize).saturating_sub(text_width) / 2;
 
         for (i, ch) in self.cached_text.chars().enumerate() {
             if y < buf.len() && x + i < buf[0].len() {
@@ -47,5 +64,39 @@ impl Widget for Controls {
         }
 
         Ok(())
+    }
+
+    fn needs_render(&self) -> bool {
+        self.needs_render.load(Ordering::Relaxed)
+    }
+
+    fn mark_rendered(&mut self) {
+        self.needs_render.store(false, Ordering::Relaxed);
+    }
+
+    fn handle_state_change(&mut self, key: &StateKey, value: &StateValue) {
+        match key {
+            StateKey::IsPaused => {
+                if let Some(is_paused) = value.as_bool() {
+                    if self.is_paused != is_paused {
+                        self.is_paused = is_paused;
+                        self.update_cached_text();
+                    }
+                }
+            }
+            StateKey::Volume => {
+                if let Some(volume) = value.as_f32() {
+                    if (self.volume - volume).abs() > 0.01 {
+                        self.volume = volume;
+                        self.update_cached_text();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn subscribed_keys(&self) -> Vec<StateKey> {
+        vec![StateKey::IsPaused, StateKey::Volume]
     }
 }
