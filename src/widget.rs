@@ -135,7 +135,6 @@ impl Layout {
                     for section in &mut self.sections {
                         if section.widget.subscribed_keys().contains(change_key) {
                             section.widget.handle_state_change(change_key, &value);
-                            section.needs_render = true;
                         }
                     }
                 }

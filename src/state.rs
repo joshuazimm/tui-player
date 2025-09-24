@@ -21,6 +21,7 @@ pub enum StateKey {
     // UI state
     TerminalSize,
     SelectedFileIndex,
+    Fps,
     
     // System state
     ShouldQuit,
@@ -117,6 +118,7 @@ impl GlobalState {
         initial_state.insert(StateKey::CurrentTrackArtist, StateValue::String("Unknown Artist".to_string()));
         initial_state.insert(StateKey::CurrentTrackAlbum, StateValue::String("Unknown Album".to_string()));
         initial_state.insert(StateKey::NewTrackRequested, StateValue::Bool(false));
+        initial_state.insert(StateKey::Fps, StateValue::F64(0.0));
 
         Self {
             state: Arc::new(RwLock::new(initial_state)),
@@ -203,6 +205,10 @@ impl GlobalState {
 
     pub fn set_should_quit(&self, should_quit: bool) {
         self.set(StateKey::ShouldQuit, StateValue::Bool(should_quit));
+    }
+
+    pub fn set_fps(&self, fps: f64) {
+        self.set(StateKey::Fps, StateValue::F64(fps));
     }
 
     // Getters

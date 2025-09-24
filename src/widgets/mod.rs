@@ -14,6 +14,7 @@ pub mod file_list;
 pub mod label;
 pub mod album_art;
 pub mod progress_bar;
+pub mod fps_counter;
 
 use crate::widget::{AbsRect, Widget, Cell};
 use enum_dispatch::enum_dispatch;
@@ -24,6 +25,7 @@ pub use file_list::FileList;
 pub use label::Label;
 pub use album_art::AlbumArt;
 pub use progress_bar::ProgressBar;
+pub use fps_counter::FpsCounter;
 
 #[enum_dispatch(Widget)]
 pub enum WidgetKind {
@@ -32,10 +34,9 @@ pub enum WidgetKind {
     FileList(FileList),
     AlbumArt(AlbumArt),
     ProgressBar(ProgressBar),
+    FpsCounter(FpsCounter),
 }
 
-// Since enum_dispatch doesn't automatically implement the new trait methods,
-// we need to implement them manually for WidgetKind
 impl WidgetKind {
     pub fn handle_state_change(&mut self, key: &StateKey, value: &StateValue) {
         match self {
@@ -44,6 +45,7 @@ impl WidgetKind {
             WidgetKind::Label(w) => w.handle_state_change(key, value),
             WidgetKind::AlbumArt(w) => w.handle_state_change(key, value),
             WidgetKind::ProgressBar(w) => w.handle_state_change(key, value),
+            WidgetKind::FpsCounter(w) => w.handle_state_change(key, value),
         }
     }
 
@@ -54,6 +56,7 @@ impl WidgetKind {
             WidgetKind::Label(w) => w.subscribed_keys(),
             WidgetKind::AlbumArt(w) => w.subscribed_keys(),
             WidgetKind::ProgressBar(w) => w.subscribed_keys(),
+            WidgetKind::FpsCounter(w) => w.subscribed_keys(),
         }
     }
 }

@@ -36,6 +36,8 @@ use ringbuf::{
 };
 use spin_sleep::SpinSleeper;
 
+use crate::widgets::fps_counter;
+
 fn process_audio_chunks<F, C>(
     mut resampler: SimpleResampler,
     channels: usize,
@@ -229,7 +231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create widgets with simplified constructors
     let file_list = FileList::new(PathBuf::from("test-tracks/Woodland"), state.clone());
-    let controls = Controls::new();
+    //let controls = Controls::new();
     let progress_bar = ProgressBar::new();
     let album_art = AlbumArt::new(false);
     let track_title_label = Label::new("No Track".to_string(), true, false)
@@ -262,7 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 width: 0.3,
                 height: 0.2,
             },
-            WidgetKind::Controls(controls),
+            WidgetKind::FpsCounter(fps_counter::FpsCounter::new()),
         ),
         Section::new(
             Rect {
@@ -349,6 +351,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sleeper = SpinSleeper::default();
     let mut next_frame = Instant::now();
     let mut last_resync = Instant::now();
+    let mut fps_update_timer = Instant::now();
+    let mut frame_count = 0u64;
 
     // Main render loop - much simpler now!
     loop {
@@ -369,6 +373,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = track_tx.send(path);
             }
             state.set_new_track_requested(false);
+        }
+
+        frame_count += 1;
+        if fps_update_timer.elapsed() >= Duration::from_millis(500) {
+            let elapsed_seconds = fps_update_timer.elapsed().as_secs_f64();
+            let current_fps = frame_count as f64 / elapsed_seconds;
+            
+            // Update FPS in global state
+            state.set_fps(current_fps);
+            
+            frame_count = 0;
+            fps_update_timer = Instant::now();
         }
 
         // Only render if something actually changed
