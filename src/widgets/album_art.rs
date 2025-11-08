@@ -1,8 +1,15 @@
-use image::ImageReader;
+use image::{ImageBuffer, Rgba};
 use crate::widget::{AbsRect, Widget, Cell};
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::style::Color;
+use fast_image_resize as fir;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::num::NonZero;
+use std::fs;
+use std::path::Path;
+use zune_jpeg::JpegDecoder;
+use zune_png::PngDecoder;
+use zune_core::result::DecodingResult;
 
 pub struct AlbumArt {
     current_art_path: Option<String>,
@@ -24,20 +31,18 @@ impl AlbumArt {
     }
 
     fn load_image(&mut self, path: &str) -> bool {
-        // Only load if the path is actually different
         if self.current_art_path.as_ref().map(|p| p.as_str()) == Some(path) {
-            return false; // No change needed
+            return false;
         }
 
-        if let Ok(reader) = ImageReader::open(path) {
-            if let Ok(dynamic_img) = reader.decode() {
-                let rgba_img = dynamic_img.to_rgba8();
-                self.img = Some(rgba_img);
-                self.current_art_path = Some(path.to_string());
-                self.needs_render.store(true, Ordering::Relaxed);
-                return true;
-            }
+        let path_obj = std::path::Path::new(path);
+        if let Some(rgba_img) = load_image_auto(path_obj) {
+            self.img = Some(rgba_img);
+            self.current_art_path = Some(path.to_string());
+            self.needs_render.store(true, Ordering::Relaxed);
+            return true;
         }
+
         false
     }
 }
@@ -52,123 +57,71 @@ impl Widget for AlbumArt {
     }
 
     fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
-        // If no image is loaded, show a placeholder
-        if self.img.is_none() {
-            // Draw a simple placeholder
-            let placeholder_text = "♪ No Album Art ♪";
-            let y = area.y as usize + (area.height as usize / 2);
-            let x_start = area.x as usize + 
-                (area.width as usize).saturating_sub(placeholder_text.len()) / 2;
-
-            for (i, ch) in placeholder_text.chars().enumerate() {
-                let x = x_start + i;
-                if y < buf.len() && x < buf[0].len() {
-                    buf[y][x].ch = ch;
-                    buf[y][x].fg = Some(Color::DarkGrey);
+        let img = match &self.img {
+            Some(img) => img,
+            None => {
+                // Draw placeholder
+                let placeholder = "♪ No Album Art ♪";
+                let y = area.y as usize + area.height as usize / 2;
+                let x_start = area.x as usize + (area.width as usize - placeholder.len()) / 2;
+                for (i, ch) in placeholder.chars().enumerate() {
+                    if y < buf.len() && x_start + i < buf[y].len() {
+                        buf[y][x_start + i].ch = ch;
+                        buf[y][x_start + i].fg = Some(Color::DarkGrey);
+                    }
                 }
+                return Ok(());
             }
-            return Ok(());
-        }
-
-        let img = self.img.as_ref().unwrap();
-        let (img_w, img_h) = img.dimensions();
-        let target_w = (area.width as u32).saturating_add(1);
-        let target_h = (area.height as u32).saturating_add(1);
-
-        if target_w == 0 || target_h == 0 {
-            return Ok(());
-        }
-
-        // Account for terminal character aspect ratio
-        let img_aspect = img_w as f32 / img_h as f32 * 1.9;
-        let target_aspect = target_w as f32 / target_h as f32;
-
-        let (draw_w, draw_h, offset_x, offset_y) = if self.stretch {
-            (target_w, target_h, 0, 0)
-        } else if img_aspect > target_aspect {
-            let draw_w = target_w;
-            let draw_h = (target_w as f32 / img_aspect).round().min(target_h as f32) as u32;
-            let offset_x = 0;
-            let offset_y = ((target_h as i32 - draw_h as i32) / 2).max(0);
-            (draw_w, draw_h, offset_x, offset_y)
-        } else {
-            let draw_h = target_h;
-            let draw_w = (target_h as f32 * img_aspect).round().min(target_w as f32) as u32;
-            let offset_x = ((target_w as i32 - draw_w as i32) / 2).max(0);
-            let offset_y = 0;
-            (draw_w, draw_h, offset_x, offset_y)
         };
 
-        for by in 0..draw_h {
-            for bx in 0..draw_w {
-                let x0 = bx * img_w / draw_w;
-                let x1 = (bx + 1) * img_w / draw_w;
+        let target_w = area.width as u32;
+        let target_h = area.height as u32 * 2; // double vertical for half-block mapping
 
-                // Top half (FG)
-                let y0_top = (by * 2) * img_h / (draw_h * 2);
-                let y1_top = (by * 2 + 1) * img_h / (draw_h * 2);
+        // Prepare fast_image_resize buffers
+        let src_img = fir::Image::from_vec_u8(
+            NonZero::new(target_w).unwrap(),
+            NonZero::new(target_h).unwrap(),
+            img.clone().into_raw(),
+            fir::PixelType::U8x4,
+        ).unwrap();
 
-                let mut r_sum: u64 = 0;
-                let mut g_sum: u64 = 0;
-                let mut b_sum: u64 = 0;
-                let mut count: u64 = 0;
+        let mut dst_img = fir::Image::new(NonZero::new(target_w).unwrap(), NonZero::new(target_h).unwrap(), fir::PixelType::U8x4);
 
-                for y in y0_top..y1_top {
-                    for x in x0..x1 {
-                        let p = img.get_pixel(x, y).0;
-                        r_sum += p[0] as u64;
-                        g_sum += p[1] as u64;
-                        b_sum += p[2] as u64;
-                        count += 1;
-                    }
-                }
+        let mut resizer = fir::Resizer::new(fir::ResizeAlg::Convolution(fir::FilterType::Box));
+        resizer.resize(&src_img.view(), &mut dst_img.view_mut()).unwrap();
 
-                let fg = if count > 0 {
-                    Color::Rgb {
-                        r: (r_sum / count) as u8,
-                        g: (g_sum / count) as u8,
-                        b: (b_sum / count) as u8,
-                    }
-                } else {
-                    Color::Black
+        // Get scaled pixel data
+        let scaled = dst_img.buffer();
+        let stride = (target_w * 4) as usize;
+
+        // Map two vertical pixels to one terminal cell using '▀'
+        for by in 0..(target_h / 2) {
+            for bx in 0..target_w {
+                let top_offset = (by * 2 * stride as u32 + bx * 4) as usize;
+                let bot_offset = ((by * 2 + 1) * stride as u32 + bx * 4) as usize;
+
+                let top_px = &scaled[top_offset..top_offset + 4];
+                let bot_px = &scaled[bot_offset..bot_offset + 4];
+
+                let fg = Color::Rgb {
+                    r: top_px[0],
+                    g: top_px[1],
+                    b: top_px[2],
+                };
+                let bg = Color::Rgb {
+                    r: bot_px[0],
+                    g: bot_px[1],
+                    b: bot_px[2],
                 };
 
-                // Bottom half (BG)
-                let y0_bot = (by * 2 + 1) * img_h / (draw_h * 2);
-                let y1_bot = (by * 2 + 2) * img_h / (draw_h * 2);
+                let x = area.x as usize + bx as usize;
+                let y = area.y as usize + by as usize;
 
-                let mut r_sum: u64 = 0;
-                let mut g_sum: u64 = 0;
-                let mut b_sum: u64 = 0;
-                let mut count: u64 = 0;
-
-                for y in y0_bot..y1_bot {
-                    for x in x0..x1 {
-                        let p = img.get_pixel(x, y).0;
-                        r_sum += p[0] as u64;
-                        g_sum += p[1] as u64;
-                        b_sum += p[2] as u64;
-                        count += 1;
-                    }
-                }
-
-                let bg = if count > 0 {
-                    Color::Rgb {
-                        r: (r_sum / count) as u8,
-                        g: (g_sum / count) as u8,
-                        b: (b_sum / count) as u8,
-                    }
-                } else {
-                    Color::Black
-                };
-
-                let x = area.x as i32 + bx as i32 + offset_x;
-                let y = area.y as i32 + by as i32 + offset_y;
-
-                if y >= 0 && x >= 0 && (y as usize) < buf.len() && (x as usize) < buf[0].len() {
-                    buf[y as usize][x as usize].ch = '▀';
-                    buf[y as usize][x as usize].fg = Some(fg);
-                    buf[y as usize][x as usize].bg = Some(bg);
+                if y < buf.len() && x < buf[y].len() {
+                    let cell = &mut buf[y][x];
+                    cell.ch = '▀';
+                    cell.fg = Some(fg);
+                    cell.bg = Some(bg);
                 }
             }
         }
@@ -223,5 +176,45 @@ impl Widget for AlbumArt {
 
     fn subscribed_keys(&self) -> Vec<StateKey> {
         vec![StateKey::CurrentTrackPath, StateKey::TerminalSize]
+    }
+}
+
+pub fn load_image_auto(path: &Path) -> Option<image::RgbaImage> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() < 8 {
+        return None;
+    }
+
+    let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G']);
+    let is_jpg = bytes[0] == 0xFF && bytes[1] == 0xD8;
+
+    if is_png {
+        let mut decoder = PngDecoder::new(&bytes);
+        let pixels = decoder.decode().ok()?;
+        let (width, height) = decoder.get_dimensions()?;
+        
+        // Extract RGBA data from DecodingResult
+        let rgba_data = match pixels {
+            DecodingResult::U8(data) => data,
+            _ => return None,
+        };
+
+        ImageBuffer::<Rgba<u8>, _>::from_raw(width as u32, height as u32, rgba_data)
+    } else if is_jpg {
+        let mut decoder = JpegDecoder::new(&bytes);
+        let pixels = decoder.decode().ok()?; // returns Vec<u8>
+        let info = decoder.info().unwrap();
+        let width = info.width as u32;
+        let height = info.height as u32;
+
+        // Convert RGB → RGBA
+        let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+        for chunk in pixels.chunks_exact(3) {
+            rgba_data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+        }
+
+        ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba_data)
+    } else {
+        None
     }
 }
