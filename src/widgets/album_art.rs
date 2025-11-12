@@ -74,29 +74,61 @@ impl Widget for AlbumArt {
             }
         };
 
-        let target_w = area.width as u32;
-        let target_h = area.height as u32 * 2; // double vertical for half-block mapping
+        let orig_w = img.width();
+        let orig_h = img.height();
+        let target_w = (area.width + 1) as u32;
+        let target_h = (area.height + 1) as u32 * 2; // double vertical for half-block mapping
 
-        // Prepare fast_image_resize buffers
+        // Calculate aspect ratios
+        let img_aspect = orig_w as f32 / orig_h as f32;
+        let target_aspect = target_w as f32 / target_h as f32;
+
+        // Determine draw dimensions and offsets based on aspect ratio
+        let (draw_w, draw_h, offset_x, offset_y) = if self.stretch {
+            (target_w, target_h, 0, 0)
+        } else if img_aspect > target_aspect {
+            // Image is wider than target - fit to width
+            let draw_w = target_w;
+            let draw_h = (target_w as f32 / img_aspect).round().min(target_h as f32) as u32;
+            let offset_x = 0;
+            let offset_y = ((target_h as i32 - draw_h as i32) / 2).max(0) as u32;
+            (draw_w, draw_h, offset_x, offset_y)
+        } else {
+            // Image is taller than target - fit to height
+            let draw_h = target_h;
+            let draw_w = (target_h as f32 * img_aspect).round().min(target_w as f32) as u32;
+            let offset_x = ((target_w as i32 - draw_w as i32) / 2).max(0) as u32;
+            let offset_y = 0;
+            (draw_w, draw_h, offset_x, offset_y)
+        };
+
+        // Create source image with ORIGINAL dimensions
         let src_img = fir::Image::from_vec_u8(
-            NonZero::new(target_w).unwrap(),
-            NonZero::new(target_h).unwrap(),
+            NonZero::new(orig_w).unwrap(),
+            NonZero::new(orig_h).unwrap(),
             img.clone().into_raw(),
             fir::PixelType::U8x4,
         ).unwrap();
 
-        let mut dst_img = fir::Image::new(NonZero::new(target_w).unwrap(), NonZero::new(target_h).unwrap(), fir::PixelType::U8x4);
+        // Create destination image with CALCULATED dimensions (not full target)
+        let mut dst_img = fir::Image::new(
+            NonZero::new(draw_w).unwrap(),
+            NonZero::new(draw_h).unwrap(),
+            fir::PixelType::U8x4
+        );
 
-        let mut resizer = fir::Resizer::new(fir::ResizeAlg::Convolution(fir::FilterType::Box));
+        let mut resizer = fir::Resizer::new(
+            fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom)
+        );
         resizer.resize(&src_img.view(), &mut dst_img.view_mut()).unwrap();
 
         // Get scaled pixel data
         let scaled = dst_img.buffer();
-        let stride = (target_w * 4) as usize;
+        let stride = (draw_w * 4) as usize;
 
         // Map two vertical pixels to one terminal cell using '▀'
-        for by in 0..(target_h / 2) {
-            for bx in 0..target_w {
+        for by in 0..(draw_h / 2) {
+            for bx in 0..draw_w {
                 let top_offset = (by * 2 * stride as u32 + bx * 4) as usize;
                 let bot_offset = ((by * 2 + 1) * stride as u32 + bx * 4) as usize;
 
@@ -114,8 +146,9 @@ impl Widget for AlbumArt {
                     b: bot_px[2],
                 };
 
-                let x = area.x as usize + bx as usize;
-                let y = area.y as usize + by as usize;
+                // Apply offsets when writing to buffer
+                let x = area.x as usize + offset_x as usize + bx as usize;
+                let y = area.y as usize + (offset_y / 2) as usize + by as usize;
 
                 if y < buf.len() && x < buf[y].len() {
                     let cell = &mut buf[y][x];

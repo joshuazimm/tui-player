@@ -230,7 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (prod, mut cons): (HeapProd<f32>, HeapCons<f32>) = rb.split();
 
     // Create widgets with simplified constructors
-    let file_list = FileList::new(PathBuf::from("test-tracks/Woodland"), state.clone());
+    let file_list = FileList::new(PathBuf::from("C:/Users/Joshua Zimmerman/Media/Music"), state.clone());
     //let controls = Controls::new();
     let progress_bar = ProgressBar::new();
     let album_art = AlbumArt::new(false);
@@ -310,11 +310,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let channels = wanted_config.channels() as u64;
     let state_for_audio = state.clone();
     let mut frames_played = 0u64;
+    let mut last_track_path = state_for_audio.current_track_path();
     
     let stream = device.build_output_stream(
         &wanted_config.into(),
         move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
             let mut consumed_any = false;
+
+            // If the current track changed, reset the local frame counter so playback position restarts at 0
+            let current_track = state_for_audio.current_track_path();
+            if current_track != last_track_path {
+                frames_played = 0;
+                last_track_path = current_track;
+                // keep state consistent
+                state_for_audio.set_playback_position(0.0);
+            }
 
             // Check if we should be playing
             if state_for_audio.is_playing() {
@@ -354,7 +364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fps_update_timer = Instant::now();
     let mut frame_count = 0u64;
 
-    // Main render loop - much simpler now!
+    // Main render loop
     loop {
         if state.should_quit() {
             break;
