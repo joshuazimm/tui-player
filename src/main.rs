@@ -5,7 +5,9 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::sync::{
     mpsc::Receiver,
+    Arc,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,13 +17,15 @@ use resampler::{ResamplerKind, SimpleResampler};
 mod widget;
 use widget::{Layout, Rect, Section};
 mod widgets;
-use widgets::{AlbumArt, Controls, FileList, Label, ProgressBar, WidgetKind};
+use widgets::{AlbumArt, Controls, FileList, Label, ProgressBar, Spectrum, WidgetKind};
 mod keyhandler;
 use keyhandler::KeyHandler;
 mod decoder;
 use decoder::{decoder_from_path};
 mod state;
 use state::{GlobalState, StateKey};
+mod analysis;
+use analysis::{DEFAULT_NUM_BANDS, FFT_SIZE, spawn_analysis_thread};
 
 // external includes
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -99,6 +103,7 @@ fn audio_thread(
     device_rate: usize,
     track_rx: Receiver<PathBuf>,
     state: GlobalState,
+    flush_flag: Arc<AtomicBool>,
 ) {
     let chunk_size = 4096;
     let sub_chunks = 1;
@@ -178,7 +183,9 @@ fn audio_thread(
             || -> bool {
                 if let Ok(new_path) = track_rx.try_recv() {
                     current_path = new_path;
-                    state.set_playback_position(0.0); // Reset position for new track
+                    state.set_playback_position(0.0);
+                    // Signal CPAL to drain the ring buffer before new audio starts
+                    flush_flag.store(true, Ordering::SeqCst);
                     true
                 } else {
                     false
@@ -186,6 +193,12 @@ fn audio_thread(
             },
             &mut prod,
         );
+
+        // Wait for the CPAL callback to finish draining the ring buffer
+        // before the new decoder starts pushing audio into it.
+        while flush_flag.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -226,14 +239,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let device_rate = wanted_config.sample_rate().0 as usize;
 
+    let flush_flag = Arc::new(AtomicBool::new(false));
+
     let rb = HeapRb::<f32>::new(device_rate * 2);
     let (prod, mut cons): (HeapProd<f32>, HeapCons<f32>) = rb.split();
+
+    // Secondary ring buffer fed from the CPAL callback for spectrum analysis.
+    // Capacity: 4 FFT windows × stereo.
+    let analysis_rb = HeapRb::<f32>::new(FFT_SIZE * 4 * 2);
+    let (mut analysis_prod, analysis_cons) = analysis_rb.split();
 
     // Create widgets with simplified constructors
     let file_list = FileList::new(PathBuf::from("C:/Users/Joshua Zimmerman/Media/Music"), state.clone());
     //let controls = Controls::new();
     let progress_bar = ProgressBar::new();
     let album_art = AlbumArt::new(false);
+    let band_centers = analysis::band_centers(DEFAULT_NUM_BANDS, device_rate as f32);
+    let spectrum = Spectrum::new(band_centers);
     let track_title_label = Label::new("No Track".to_string(), true, false)
         .with_subscription(vec![StateKey::CurrentTrackTitle]);
 
@@ -275,14 +297,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             WidgetKind::ProgressBar(progress_bar),
         ),
+        // Album art takes the upper portion of the right panel
         Section::new(
             Rect {
                 x: 0.3,
                 y: 0.0,
                 width: 0.7,
-                height: 0.9,
+                height: 0.55,
             },
             WidgetKind::AlbumArt(album_art),
+        ),
+        // Spectrum visualiser occupies the lower portion of the right panel
+        Section::new(
+            Rect {
+                x: 0.3,
+                y: 0.55,
+                width: 0.7,
+                height: 0.35,
+            },
+            WidgetKind::Spectrum(spectrum),
         ),
     ];
 
@@ -297,11 +330,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state_clone = state.clone();
 
+    let flush_flag_audio = flush_flag.clone();
+
     // Spawn decoder thread
     thread::spawn(move || {
         // Wait for initial track to be selected
         if let Ok(path) = track_rx.recv() {
-            audio_thread(path, prod, device_rate, track_rx, state_clone);
+            audio_thread(path, prod, device_rate, track_rx, state_clone, flush_flag_audio);
         }
     });
 
@@ -311,10 +346,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_for_audio = state.clone();
     let mut frames_played = 0u64;
     let mut last_track_path = state_for_audio.current_track_path();
-    
+
+    let flush_flag_cpal = flush_flag.clone();
+
     let stream = device.build_output_stream(
         &wanted_config.into(),
         move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            // If the audio thread signalled a track change, drain stale audio
+            // from the ring buffer and output silence until it's empty.
+            if flush_flag_cpal.load(Ordering::Acquire) {
+                while cons.try_pop().is_some() {}
+                last_sample = 0.0;
+                flush_flag_cpal.store(false, Ordering::Release);
+                for sample in output.iter_mut() {
+                    *sample = 0.0;
+                    let _ = analysis_prod.try_push(0.0);
+                }
+                return;
+            }
+
             let mut consumed_any = false;
 
             // If the current track changed, reset the local frame counter so playback position restarts at 0
@@ -335,20 +385,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let vol = state_for_audio.volume();
                     *sample = (last_sample * vol).clamp(-1.0, 1.0);
+                    // Feed the PRE-volume sample so the spectrum is volume-independent
+                    let _ = analysis_prod.try_push(last_sample);
                 }
 
                 if consumed_any {
                     let frames_written = (output.len() as u64) / channels;
                     frames_played += frames_written;
-                    
+
                     // Update playback position in state
                     let position = frames_played as f64 / device_rate as f64;
                     state_for_audio.set_playback_position(position);
                 }
             } else {
-                // Paused - output silence
+                // Paused - output silence and push zeros so analysis sees silence
                 for sample in output.iter_mut() {
                     *sample = 0.0;
+                    let _ = analysis_prod.try_push(0.0);
                 }
             }
         },
@@ -357,6 +410,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     
     stream.play()?;
+
+    // Spawn the FFT analysis + beat detection thread
+    spawn_analysis_thread(analysis_cons, 2, device_rate, DEFAULT_NUM_BANDS, state.clone());
 
     let sleeper = SpinSleeper::default();
     let mut next_frame = Instant::now();

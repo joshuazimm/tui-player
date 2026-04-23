@@ -15,6 +15,7 @@ pub mod label;
 pub mod album_art;
 pub mod progress_bar;
 pub mod fps_counter;
+pub mod spectrum;
 
 use crate::widget::{AbsRect, Widget, Cell};
 use enum_dispatch::enum_dispatch;
@@ -26,6 +27,7 @@ pub use label::Label;
 pub use album_art::AlbumArt;
 pub use progress_bar::ProgressBar;
 pub use fps_counter::FpsCounter;
+pub use spectrum::Spectrum;
 
 #[enum_dispatch(Widget)]
 pub enum WidgetKind {
@@ -35,6 +37,7 @@ pub enum WidgetKind {
     AlbumArt(AlbumArt),
     ProgressBar(ProgressBar),
     FpsCounter(FpsCounter),
+    Spectrum(Spectrum),
 }
 
 impl WidgetKind {
@@ -46,6 +49,7 @@ impl WidgetKind {
             WidgetKind::AlbumArt(w) => w.handle_state_change(key, value),
             WidgetKind::ProgressBar(w) => w.handle_state_change(key, value),
             WidgetKind::FpsCounter(w) => w.handle_state_change(key, value),
+            WidgetKind::Spectrum(w) => w.handle_state_change(key, value),
         }
     }
 
@@ -57,6 +61,7 @@ impl WidgetKind {
             WidgetKind::AlbumArt(w) => w.subscribed_keys(),
             WidgetKind::ProgressBar(w) => w.subscribed_keys(),
             WidgetKind::FpsCounter(w) => w.subscribed_keys(),
+            WidgetKind::Spectrum(w) => w.subscribed_keys(),
         }
     }
 }

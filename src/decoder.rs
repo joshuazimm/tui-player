@@ -1,5 +1,6 @@
 use crate::resampler::pcm_to_f32;
 use claxon::FlacReader;
+use hound::WavReader;
 use lewton::VorbisError;
 use lewton::inside_ogg::OggStreamReader;
 use minimp3::Decoder as Minimp3Decoder;
@@ -408,11 +409,67 @@ impl OpusTrack {
     }
 }
 
+pub struct WavTrack {
+    samples: Vec<f32>,
+    pos: usize,
+    sample_rate: u32,
+    channels: u32,
+    total_samples: u64,
+}
+
+impl WavTrack {
+    pub fn new(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let mut reader = WavReader::open(path)?;
+        let spec = reader.spec();
+        let channels = spec.channels as u32;
+
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Float => {
+                reader.samples::<f32>().filter_map(Result::ok).collect()
+            }
+            hound::SampleFormat::Int => {
+                let bits = spec.bits_per_sample;
+                let max_val = (1i64 << (bits - 1)) as f32;
+                if bits <= 16 {
+                    reader.samples::<i16>().filter_map(Result::ok)
+                        .map(|s| s as f32 / 32768.0)
+                        .collect()
+                } else {
+                    reader.samples::<i32>().filter_map(Result::ok)
+                        .map(|s| s as f32 / max_val)
+                        .collect()
+                }
+            }
+        };
+
+        let total_samples = samples.len() as u64 / channels.max(1) as u64;
+
+        Ok(WavTrack {
+            samples,
+            pos: 0,
+            sample_rate: spec.sample_rate,
+            channels,
+            total_samples,
+        })
+    }
+
+    fn next_sample(&mut self) -> Option<f32> {
+        if self.pos < self.samples.len() {
+            let s = self.samples[self.pos];
+            self.pos += 1;
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
 pub enum AudioDecoder {
     Flac(FlacTrack),
     Mp3(Mp3Track),
     Opus(OpusTrack),
     Vorbis(VorbisTrack),
+    Wav(WavTrack),
 }
 
 impl AudioDecoder {
@@ -422,6 +479,7 @@ impl AudioDecoder {
             AudioDecoder::Mp3(track) => track.sample_rate as usize,
             AudioDecoder::Vorbis(track) => track.sample_rate as usize,
             AudioDecoder::Opus(track) => track.sample_rate as usize,
+            AudioDecoder::Wav(track) => track.sample_rate as usize,
         }
     }
 
@@ -431,6 +489,7 @@ impl AudioDecoder {
             AudioDecoder::Mp3(track) => track.total_samples as usize,
             AudioDecoder::Vorbis(track) => track.total_samples as usize,
             AudioDecoder::Opus(track) => track.total_samples as usize,
+            AudioDecoder::Wav(track) => track.total_samples as usize,
         }
     }
 
@@ -440,17 +499,9 @@ impl AudioDecoder {
             AudioDecoder::Mp3(track) => track.channels as usize,
             AudioDecoder::Vorbis(track) => track.channels as usize,
             AudioDecoder::Opus(track) => track.channels as usize,
+            AudioDecoder::Wav(track) => track.channels as usize,
         }
     }
-
-    // pub fn bits(&self) -> u32 {
-    //     match self {
-    //         AudioDecoder::Flac(track) => track.bits_per_sample,
-    //         AudioDecoder::Mp3(track) => track.bits_per_sample,
-    //         AudioDecoder::Vorbis(track) => track.bits_per_sample,
-    //         AudioDecoder::Opus(track) => track.bits_per_sample,
-    //     }
-    // }
 
     pub fn next_sample(&mut self) -> Option<f32> {
         match self {
@@ -458,6 +509,7 @@ impl AudioDecoder {
             AudioDecoder::Mp3(track) => track.next_sample(),
             AudioDecoder::Vorbis(track) => track.next_sample(),
             AudioDecoder::Opus(track) => track.next_sample(),
+            AudioDecoder::Wav(track) => track.next_sample(),
         }
     }
 }
@@ -488,6 +540,10 @@ pub fn decoder_from_path(
         "opus" => {
             let path_str = path.to_str().ok_or("Invalid path")?;
             Ok(AudioDecoder::Opus(OpusTrack::new(path_str)?))
+        }
+        "wav" | "wave" => {
+            let path_str = path.to_str().ok_or("Invalid path")?;
+            Ok(AudioDecoder::Wav(WavTrack::new(path_str)?))
         }
         _ => Err("Unsupported audio format".into()),
     }

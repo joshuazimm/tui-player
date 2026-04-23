@@ -23,6 +23,11 @@ pub enum StateKey {
     SelectedFileIndex,
     Fps,
     
+    // Audio analysis
+    FrequencyBands,
+    AlbumArtColor,
+    AlbumArtColorSecondary,
+
     // System state
     ShouldQuit,
     NavigationUp,
@@ -40,6 +45,8 @@ pub enum StateValue {
     String(String),
     PathBuf(PathBuf),
     TerminalSize(u16, u16),
+    FrequencyBands(Vec<f32>),
+    RgbColor(u8, u8, u8),
 }
 
 impl StateValue {
@@ -66,6 +73,12 @@ impl StateValue {
     }
     pub fn as_terminal_size(&self) -> Option<(u16, u16)> {
         match self { StateValue::TerminalSize(w, h) => Some((*w, *h)), _ => None, }
+    }
+    pub fn as_frequency_bands(&self) -> Option<&Vec<f32>> {
+        match self { StateValue::FrequencyBands(v) => Some(v), _ => None, }
+    }
+    pub fn as_rgb_color(&self) -> Option<(u8, u8, u8)> {
+        match self { StateValue::RgbColor(r, g, b) => Some((*r, *g, *b)), _ => None, }
     }
 }
 
@@ -209,6 +222,21 @@ impl GlobalState {
 
     pub fn set_fps(&self, fps: f64) {
         self.set(StateKey::Fps, StateValue::F64(fps));
+    }
+
+    pub fn set_frequency_bands(&self, bands: Vec<f32>) {
+        self.set(StateKey::FrequencyBands, StateValue::FrequencyBands(bands));
+    }
+
+    pub fn set_album_art_colors(
+        &self,
+        primary: (u8, u8, u8),
+        secondary: (u8, u8, u8),
+    ) {
+        self.set(StateKey::AlbumArtColor,
+            StateValue::RgbColor(primary.0, primary.1, primary.2));
+        self.set(StateKey::AlbumArtColorSecondary,
+            StateValue::RgbColor(secondary.0, secondary.1, secondary.2));
     }
 
     // Getters
