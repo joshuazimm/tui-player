@@ -1,5 +1,6 @@
-use crate::widget::{AbsRect, Widget, Cell};
+use crate::widget::{AbsRect, Rect, Widget, Cell};
 use crate::state::{GlobalState, StateKey, StateValue};
+use crossterm::event::{MouseButton, MouseEventKind};
 use crossterm::style::Color;
 use std::fs;
 use std::path::PathBuf;
@@ -60,6 +61,11 @@ pub struct FileList {
     scroll_offset: AtomicUsize,
     needs_render: AtomicBool,
     state: GlobalState,
+    modal_active: bool,
+    rect: Rect,
+    abs_x: u16,
+    abs_y: u16,
+    abs_w: u16,
 }
 
 fn rainbow_color(i: usize) -> Color {
@@ -182,7 +188,7 @@ fn get_entry_by_flat_index_mut<'a>(entries: &'a mut [FileSystemEntry], flat_inde
 }
 
 impl FileList {
-    pub fn new(path: PathBuf, state: GlobalState) -> Self {
+    pub fn new(path: PathBuf, rect: Rect, state: GlobalState) -> Self {
         let entries = scan_directory(&path, 0);
         let mut flat_view = Vec::new();
         let mut base_index = 0;
@@ -198,6 +204,11 @@ impl FileList {
             selected_index: 0,
             needs_render: AtomicBool::new(true),
             state,
+            modal_active: false,
+            rect,
+            abs_x: 0,
+            abs_y: 0,
+            abs_w: 0,
         }
     }
 
@@ -284,20 +295,6 @@ impl FileList {
         }
     }
 
-    fn handle_track_selection(&self) -> Option<PathBuf> {
-        if let Some(path) = self.get_selected_file_path() {
-            let title = path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string());
-            self.state.set_current_track(path.clone(), title, None, None);
-            self.state.set_playing(true);
-            self.state.set_new_track_requested(true);
-            Some(path)
-        } else {
-            None
-        }
-    }
-
     fn get_display_prefix(&self, entry: &FileSystemEntry) -> String {
         let indent = " ".repeat(entry.depth() * INDENT_SIZE);
         let icon = match entry {
@@ -308,12 +305,73 @@ impl FileList {
         };
         format!("{}{}", indent, icon)
     }
+
+    pub fn handle_mouse(&mut self, _local_col: u16, local_row: u16, abs_col: u16, abs_row: u16, kind: MouseEventKind) {
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if local_row < PADDING || self.flat_view.is_empty() {
+                    return;
+                }
+                let scroll = self.scroll_offset.load(Ordering::Relaxed);
+                let flat_index = scroll + (local_row - PADDING) as usize;
+                if flat_index >= self.flat_view.len() {
+                    return;
+                }
+
+                self.selected_index = flat_index as u32;
+                self.state.set_selected_file_index(flat_index as u32);
+
+                let is_dir = {
+                    let mut cur = 0;
+                    get_entry_by_flat_index(&self.entries, flat_index, &mut cur)
+                        .map(|e| e.is_directory())
+                        .unwrap_or(false)
+                };
+
+                if is_dir {
+                    self.handle_toggle_expand();
+                } else if let Some(path) = self.get_selected_file_path() {
+                    self.state.set_modal_spawn_pos(abs_col, abs_row);
+                    self.state.set_pending_track_path(path);
+                    self.state.set_modal_open(true);
+                }
+                self.needs_render.store(true, Ordering::Relaxed);
+            }
+            MouseEventKind::ScrollUp => {
+                if self.selected_index > 0 {
+                    self.selected_index -= 1;
+                    self.state.set_selected_file_index(self.selected_index);
+                    self.needs_render.store(true, Ordering::Relaxed);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if !self.flat_view.is_empty()
+                    && (self.selected_index as usize) < self.flat_view.len() - 1
+                {
+                    self.selected_index += 1;
+                    self.state.set_selected_file_index(self.selected_index);
+                    self.needs_render.store(true, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Widget for FileList {
     fn update(&mut self, state: &GlobalState) {
         self.tick = self.tick.wrapping_add(1);
-        
+
+        // Keep abs position in sync so keyboard events can compute spawn coords
+        if let Some(sv) = state.get(&StateKey::TerminalSize) {
+            if let Some((tw, th)) = sv.as_terminal_size() {
+                let (ax, ay, aw, _) = self.rect.to_absolute(tw, th);
+                self.abs_x = ax.saturating_add(1);
+                self.abs_y = ay.saturating_add(1);
+                self.abs_w = aw.saturating_sub(2);
+            }
+        }
+
         // Update selected index from state
         let current_index = state.selected_file_index();
         if !self.flat_view.is_empty() && self.selected_index != current_index {
@@ -474,35 +532,48 @@ impl Widget for FileList {
 
     fn handle_state_change(&mut self, key: &StateKey, value: &StateValue) {
         match key {
+            StateKey::ModalOpen => {
+                if let Some(open) = value.as_bool() {
+                    self.modal_active = open;
+                }
+            }
             StateKey::NavigationUp => {
                 if let Some(true) = value.as_bool() {
-                    self.handle_navigation(-1);
-                    // Scroll adjustment happens automatically in render()
-                    self.state.set(StateKey::NavigationUp, StateValue::Bool(false));
+                    if !self.modal_active {
+                        self.handle_navigation(-1);
+                        self.state.set(StateKey::NavigationUp, StateValue::Bool(false));
+                    }
                 }
             }
             StateKey::NavigationDown => {
                 if let Some(true) = value.as_bool() {
-                    self.handle_navigation(1);
-                    // Scroll adjustment happens automatically in render()
-                    self.state.set(StateKey::NavigationDown, StateValue::Bool(false));
+                    if !self.modal_active {
+                        self.handle_navigation(1);
+                        self.state.set(StateKey::NavigationDown, StateValue::Bool(false));
+                    }
                 }
             }
             StateKey::TrackSelected => {
                 if let Some(true) = value.as_bool() {
-                    if !self.flat_view.is_empty() {
+                    if !self.modal_active && !self.flat_view.is_empty() {
                         let flat_index = (self.selected_index as usize) % self.flat_view.len();
                         let mut current_flat = 0;
-                        
+
                         if let Some(entry) = get_entry_by_flat_index(&self.entries, flat_index, &mut current_flat) {
                             if entry.is_directory() {
                                 self.handle_toggle_expand();
-                            } else {
-                                self.handle_track_selection();
+                            } else if let Some(path) = self.get_selected_file_path() {
+                                let scroll = self.scroll_offset.load(Ordering::Relaxed);
+                                let visual_row = flat_index.saturating_sub(scroll);
+                                let spawn_x = self.abs_x + self.abs_w;
+                                let spawn_y = self.abs_y + PADDING as u16 + visual_row as u16;
+                                self.state.set_modal_spawn_pos(spawn_x, spawn_y);
+                                self.state.set_pending_track_path(path);
+                                self.state.set_modal_open(true);
                             }
                         }
+                        self.state.set(StateKey::TrackSelected, StateValue::Bool(false));
                     }
-                    self.state.set(StateKey::TrackSelected, StateValue::Bool(false));
                 }
             }
             StateKey::SelectedFileIndex => {
@@ -511,7 +582,6 @@ impl Widget for FileList {
                         let clamped_index = new_index % self.flat_view.len() as u32;
                         if self.selected_index != clamped_index {
                             self.selected_index = clamped_index;
-                            // Scroll adjustment happens in render()
                             self.needs_render.store(true, Ordering::Relaxed);
                         }
                     }
@@ -526,7 +596,8 @@ impl Widget for FileList {
             StateKey::SelectedFileIndex,
             StateKey::NavigationUp,
             StateKey::NavigationDown,
-            StateKey::TrackSelected
+            StateKey::TrackSelected,
+            StateKey::ModalOpen,
         ]
     }
 }

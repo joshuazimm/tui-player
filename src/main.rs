@@ -31,6 +31,7 @@ use analysis::{DEFAULT_NUM_BANDS, FFT_SIZE, spawn_analysis_thread};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
     cursor::{Hide, Show},
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -221,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut out = stdout();
     terminal::enable_raw_mode()?;
-    execute!(out, EnterAlternateScreen, Hide)?;
+    execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
 
     // Initialize global state
     let state = GlobalState::new();
@@ -250,7 +251,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut analysis_prod, analysis_cons) = analysis_rb.split();
 
     // Create widgets with simplified constructors
-    let file_list = FileList::new(PathBuf::from("C:/Users/Joshua Zimmerman/Media/Music"), state.clone());
+    let file_list_rect = Rect { x: 0.0, y: 0.0, width: 0.3, height: 0.5 };
+    let file_list = FileList::new(PathBuf::from("C:/Users/Joshua Zimmerman/Media/Music"), file_list_rect, state.clone());
     //let controls = Controls::new();
     let progress_bar = ProgressBar::new();
     let album_art = AlbumArt::new(false);
@@ -261,15 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create layout with updated sections
     let sections = vec![
-        Section::new(
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.3,
-                height: 0.5,
-            },
-            WidgetKind::FileList(file_list),
-        ),
+        Section::new(file_list_rect, WidgetKind::FileList(file_list)),
         Section::new(
             Rect {
                 x: 0.0,
@@ -319,14 +313,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
 
-    let mut layout = Layout::new(sections);
+    let mut layout = Layout::new(sections, state.clone());
     
     // Initialize all widgets with state (this sets up subscriptions)
     layout.init_all(&state);
 
     // Spawn unified key handler
-    let mut key_handler = KeyHandler::new(state.clone());
+    let (mouse_tx, mouse_rx) = std::sync::mpsc::channel();
+    let mut key_handler = KeyHandler::new(state.clone(), mouse_tx);
     key_handler.start();
+    layout.set_mouse_receiver(mouse_rx);
 
     let state_clone = state.clone();
 
@@ -474,7 +470,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     key_handler.stop();
-    execute!(out, LeaveAlternateScreen, Show)?;
+    execute!(out, LeaveAlternateScreen, Show, DisableMouseCapture)?;
     terminal::disable_raw_mode()?;
     Ok(())
 }

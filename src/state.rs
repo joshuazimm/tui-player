@@ -33,6 +33,12 @@ pub enum StateKey {
     NavigationUp,
     NavigationDown,
     TrackSelected,
+
+    // Modal state
+    ModalOpen,
+    PendingTrackPath,
+    ModalSpawnX,
+    ModalSpawnY,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +138,7 @@ impl GlobalState {
         initial_state.insert(StateKey::CurrentTrackAlbum, StateValue::String("Unknown Album".to_string()));
         initial_state.insert(StateKey::NewTrackRequested, StateValue::Bool(false));
         initial_state.insert(StateKey::Fps, StateValue::F64(0.0));
+        initial_state.insert(StateKey::ModalOpen, StateValue::Bool(false));
 
         Self {
             state: Arc::new(RwLock::new(initial_state)),
@@ -222,6 +229,33 @@ impl GlobalState {
 
     pub fn set_fps(&self, fps: f64) {
         self.set(StateKey::Fps, StateValue::F64(fps));
+    }
+
+    pub fn set_modal_open(&self, open: bool) {
+        self.set(StateKey::ModalOpen, StateValue::Bool(open));
+    }
+
+    pub fn modal_open(&self) -> bool {
+        self.get(&StateKey::ModalOpen).and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    pub fn set_pending_track_path(&self, path: PathBuf) {
+        self.set(StateKey::PendingTrackPath, StateValue::PathBuf(path));
+    }
+
+    pub fn pending_track_path(&self) -> Option<PathBuf> {
+        self.get(&StateKey::PendingTrackPath).and_then(|v| v.as_pathbuf().cloned())
+    }
+
+    pub fn set_modal_spawn_pos(&self, x: u16, y: u16) {
+        self.set(StateKey::ModalSpawnX, StateValue::U32(x as u32));
+        self.set(StateKey::ModalSpawnY, StateValue::U32(y as u32));
+    }
+
+    pub fn modal_spawn_pos(&self) -> (u16, u16) {
+        let x = self.get(&StateKey::ModalSpawnX).and_then(|v| v.as_u32()).unwrap_or(0) as u16;
+        let y = self.get(&StateKey::ModalSpawnY).and_then(|v| v.as_u32()).unwrap_or(0) as u16;
+        (x, y)
     }
 
     pub fn set_frequency_bands(&self, bands: Vec<f32>) {

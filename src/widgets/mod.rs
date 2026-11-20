@@ -11,6 +11,7 @@
 
 pub mod controls;
 pub mod file_list;
+pub mod file_action_modal;
 pub mod label;
 pub mod album_art;
 pub mod progress_bar;
@@ -20,9 +21,11 @@ pub mod spectrum;
 use crate::widget::{AbsRect, Widget, Cell};
 use enum_dispatch::enum_dispatch;
 use crate::state::{GlobalState, StateKey, StateValue};
+use crossterm::event::MouseEventKind;
 
 pub use controls::Controls;
 pub use file_list::FileList;
+pub use file_action_modal::FileActionModal;
 pub use label::Label;
 pub use album_art::AlbumArt;
 pub use progress_bar::ProgressBar;
@@ -62,6 +65,13 @@ impl WidgetKind {
             WidgetKind::ProgressBar(w) => w.subscribed_keys(),
             WidgetKind::FpsCounter(w) => w.subscribed_keys(),
             WidgetKind::Spectrum(w) => w.subscribed_keys(),
+        }
+    }
+
+    pub fn handle_mouse(&mut self, local_col: u16, local_row: u16, abs_col: u16, abs_row: u16, kind: MouseEventKind) {
+        match self {
+            WidgetKind::FileList(w) => w.handle_mouse(local_col, local_row, abs_col, abs_row, kind),
+            _ => {}
         }
     }
 }

@@ -1,8 +1,11 @@
 use std::io::{Write};
+use std::sync::mpsc::Receiver;
 use enum_dispatch::enum_dispatch;
 use crate::widgets::WidgetKind;
+use crate::widgets::FileActionModal;
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::{terminal::size, cursor::MoveTo, style::{SetForegroundColor, SetBackgroundColor, ResetColor, Color}};
+use crossterm::event::MouseEvent;
 
 #[derive(Clone, Copy)]
 pub struct Cell {
@@ -90,24 +93,58 @@ pub struct Layout {
     last_global_change_id: u64,
     screen: Vec<Vec<Cell>>, // cached last frame
     force_full_render: bool, // Flag to force complete re-render
+    mouse_rx: Option<Receiver<MouseEvent>>,
+    modal: FileActionModal,
 }
 
 impl Layout {
-    pub fn new(sections: Vec<Section>) -> Self {
+    pub fn new(sections: Vec<Section>, state: GlobalState) -> Self {
         let (width, height) = size().unwrap_or((80, 24));
         Self {
             sections,
             last_terminal_size: (width, height),
             last_global_change_id: 0,
             screen: make_screen_buffer(width, height),
-            force_full_render: true, // Start with a full render
+            force_full_render: true,
+            mouse_rx: None,
+            modal: FileActionModal::new(state),
         }
+    }
+
+    pub fn set_mouse_receiver(&mut self, rx: Receiver<MouseEvent>) {
+        self.mouse_rx = Some(rx);
     }
 
     pub fn init_all(&mut self, _state: &GlobalState) {
     }
 
+    fn route_mouse_event(&mut self, ev: MouseEvent) {
+        if self.modal.is_active() {
+            self.modal.handle_mouse(ev.column, ev.row, ev.kind);
+            return;
+        }
+        let col = ev.column;
+        let row = ev.row;
+        for section in &mut self.sections {
+            let r = &section.abs_rect;
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                let local_col = col - r.x;
+                let local_row = row - r.y;
+                section.widget.handle_mouse(local_col, local_row, col, row, ev.kind);
+                break;
+            }
+        }
+    }
+
     pub fn update_all(&mut self, state: &GlobalState) -> std::io::Result<()> {
+        // Drain and route pending mouse events
+        let mouse_events: Vec<MouseEvent> = self.mouse_rx.as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for ev in mouse_events {
+            self.route_mouse_event(ev);
+        }
+
         // Check if terminal size changed
         if let Ok((width, height)) = size() {
             if (width, height) != self.last_terminal_size {
@@ -128,7 +165,7 @@ impl Layout {
         if state_changed {
             // Get all changes and distribute them to interested widgets
             let changes = state.take_changes();
-            
+
             for change_key in &changes {
                 if let Some(value) = state.get(change_key) {
                     // Send changes to widgets that care about this key
@@ -137,10 +174,20 @@ impl Layout {
                             section.widget.handle_state_change(change_key, &value);
                         }
                     }
+                    // Also route to modal
+                    if self.modal.subscribed_keys().contains(change_key) {
+                        self.modal.handle_state_change(change_key, &value);
+                    }
                 }
             }
-            
+
             self.last_global_change_id = current_change_id;
+        }
+
+        // If modal changed, force a full re-render so the overlay is applied on top
+        if self.modal.needs_render() {
+            self.force_full_render = true;
+            self.modal.mark_rendered();
         }
 
         // Update all widgets
@@ -214,6 +261,12 @@ impl Layout {
             }
         }
 
+        // Apply modal overlay on top of everything
+        if self.modal.is_active() {
+            let (tw, th) = (self.screen[0].len() as u16, self.screen.len() as u16);
+            self.modal.render_overlay(&mut self.screen, tw, th);
+        }
+
         Self::flush_buffer(out, &self.screen)
     }
 
@@ -245,6 +298,12 @@ impl Layout {
         for section in self.sections.iter_mut() {
             section.widget.render(&section.abs_rect, &mut self.screen)?;
             section.needs_render = false;
+        }
+
+        // Apply modal overlay on top of everything
+        if self.modal.is_active() {
+            let (tw, th) = (self.screen[0].len() as u16, self.screen.len() as u16);
+            self.modal.render_overlay(&mut self.screen, tw, th);
         }
 
         self.force_full_render = false;
