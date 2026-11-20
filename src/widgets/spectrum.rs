@@ -1,4 +1,5 @@
-use crate::widget::{AbsRect, Cell, Widget};
+use crate::canvas::Canvas;
+use crate::widget::Widget;
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::style::Color;
 
@@ -55,17 +56,14 @@ impl Spectrum {
         ((db - FLOOR_DB) / (-FLOOR_DB)).clamp(0.0, 1.0)
     }
 
-    /// Draw frequency labels one row below the bars.
-    fn draw_labels(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) {
-        if self.band_centers.is_empty() || area.height == 0 {
+    /// Draw frequency labels on the bottom row, below the bars.
+    fn draw_labels(&self, canvas: &mut Canvas) {
+        if self.band_centers.is_empty() || canvas.height() == 0 {
             return;
         }
-        let w = area.width as usize;
+        let w = canvas.width();
         let n = self.band_centers.len();
-        let label_y = (area.y + area.height) as usize;
-        if label_y >= buf.len() {
-            return;
-        }
+        let label_y = canvas.height() - 1;
 
         let mut last_end_x: usize = 0;
         for &freq in LABEL_FREQS {
@@ -81,7 +79,7 @@ impl Spectrum {
                 continue;
             };
 
-            let col_start = area.x as usize + band_idx * w / n;
+            let col_start = band_idx * w / n;
             let col_width = (w / n).max(1);
             let band_mid_x = col_start + col_width / 2;
 
@@ -96,14 +94,7 @@ impl Spectrum {
                 continue;
             }
 
-            let row = &mut buf[label_y];
-            for (i, ch) in label.chars().enumerate() {
-                let x = label_x + i;
-                if x < row.len() {
-                    row[x].ch = ch;
-                    row[x].fg = Some(Color::DarkGrey);
-                }
-            }
+            canvas.put_str(label_x, label_y, &label, Some(Color::DarkGrey), None);
             last_end_x = label_x + label.len();
         }
     }
@@ -125,23 +116,23 @@ impl Widget for Spectrum {
         }
     }
 
-    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+    fn render(&self, canvas: &mut Canvas) -> std::io::Result<()> {
         if self.bands.is_empty() {
             return Ok(());
         }
-        let w = area.width as usize;
-        let h = area.height as usize;
+        let w = canvas.width();
+        // The bottom row holds the frequency labels; bars use the rows above it
+        let h = canvas.height().saturating_sub(1);
         if w == 0 || h == 0 {
             return Ok(());
         }
 
         let n = self.bands.len();
-        let base_y = area.y as usize + h;
-        let buf_width = buf.first().map(|r| r.len()).unwrap_or(0);
+        let base_y = h;
 
         for band_idx in 0..n {
-            let x_start = area.x as usize + band_idx * w / n;
-            let x_end = area.x as usize + (band_idx + 1) * w / n;
+            let x_start = band_idx * w / n;
+            let x_end = (band_idx + 1) * w / n;
             if x_start >= x_end {
                 continue;
             }
@@ -158,40 +149,31 @@ impl Widget for Spectrum {
             let remainder = bar_eighths % 8;
             let peak_row = (peak * h as f32) as usize;
 
-            for x in x_start..x_end.min(buf_width) {
+            for x in x_start..x_end {
                 // Solid cells upward from the base
                 for row_up in 0..full_cells.min(h) {
                     let y = base_y.saturating_sub(1 + row_up);
-                    if y < buf.len() {
-                        buf[y][x].ch = '█';
-                        buf[y][x].fg = Some(self.bar_color);
-                    }
+                    canvas.set(x, y, '█', Some(self.bar_color), None);
                 }
 
                 // Partial block at the bar tip
                 if remainder > 0 && full_cells < h {
                     let y = base_y.saturating_sub(1 + full_cells);
-                    if y < buf.len() {
-                        buf[y][x].ch = BLOCK[remainder - 1];
-                        buf[y][x].fg = Some(self.bar_color);
-                    }
+                    canvas.set(x, y, BLOCK[remainder - 1], Some(self.bar_color), None);
                 }
 
                 // Peak-hold marker above the current bar
                 if peak_row > 0 && peak_row <= h {
                     let y = base_y.saturating_sub(peak_row);
-                    if y < buf.len() {
-                        let bar_top_y = base_y.saturating_sub(full_cells.max(1));
-                        if y < bar_top_y {
-                            buf[y][x].ch = '▄';
-                            buf[y][x].fg = Some(self.peak_color);
-                        }
+                    let bar_top_y = base_y.saturating_sub(full_cells.max(1));
+                    if y < bar_top_y {
+                        canvas.set(x, y, '▄', Some(self.peak_color), None);
                     }
                 }
             }
         }
 
-        self.draw_labels(area, buf);
+        self.draw_labels(canvas);
         Ok(())
     }
 

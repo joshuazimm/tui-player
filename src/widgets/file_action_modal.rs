@@ -1,4 +1,5 @@
-use crate::widget::Cell;
+use crate::canvas::Canvas;
+use crate::widget::AbsRect;
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::style::Color;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -179,79 +180,73 @@ impl FileActionModal {
         self.state.set_modal_open(false);
     }
 
-    pub fn render_overlay(&self, screen: &mut Vec<Vec<Cell>>, term_w: u16, term_h: u16) {
-        if !self.active || screen.is_empty() || screen[0].is_empty() {
+    /// The modal's box on screen. Layout hands `render` a canvas of exactly this area.
+    pub fn area(&self, term_w: u16, term_h: u16) -> AbsRect {
+        let (x, y, width, height) = self.compute_pos(term_w, term_h);
+        AbsRect { x, y, width, height }
+    }
+
+    /// Draws the modal in local coordinates: (0, 0) is its top-left corner.
+    pub fn render(&self, canvas: &mut Canvas) {
+        let (w, h) = (canvas.width(), canvas.height());
+        if !self.active || w < 2 || h < 2 {
             return;
         }
-
-        let (x, y, w, h) = self.compute_pos(term_w, term_h);
 
         // Fill background — explicit fg+bg so flush_buffer emits both color
         // channels and fully overwrites any half-block '▀' cell underneath
         // (album art uses both fg and bg; leaving fg=None would leave the
         // top-half color of the previous character showing on some terminals).
-        for dy in 0..h {
-            for dx in 0..w {
-                self.set_cell(screen, x + dx, y + dy, ' ', Some(BG), Some(BG));
+        for y in 0..h {
+            for x in 0..w {
+                canvas.set(x, y, ' ', Some(BG), Some(BG));
             }
         }
 
         // Border
-        self.draw_border(screen, x, y, w, h);
+        Self::draw_border(canvas, w, h);
 
         // Title embedded in top border
         let title = " File Actions ";
-        let title_x = x + w.saturating_sub(title.len() as u16) / 2;
-        self.write_str(screen, title_x, y, title, Some(TEXT), Some(BG));
+        let title_x = w.saturating_sub(title.len()) / 2;
+        canvas.put_str(title_x, 0, title, Some(TEXT), Some(BG));
 
         // Options rows
         for (i, option) in OPTIONS.iter().enumerate() {
-            let oy = y + 2 + i as u16;
-            if oy >= y + h - 1 {
+            let oy = 2 + i;
+            if oy >= h - 1 {
                 break;
             }
             let is_sel = i == self.selected_option;
             let (fg, bg) = if is_sel { (SEL_FG, SEL_BG) } else { (TEXT, BG) };
-            for dx in 1..w.saturating_sub(1) {
-                self.set_cell(screen, x + dx, oy, ' ', Some(fg), Some(bg));
+            for x in 1..w - 1 {
+                canvas.set(x, oy, ' ', Some(fg), Some(bg));
             }
             let prefix = if is_sel { " > " } else { "   " };
             let text = format!("{}{}", prefix, option);
-            self.write_str(screen, x + 1, oy, &text, Some(fg), Some(bg));
+            canvas.put_str(1, oy, &text, Some(fg), Some(bg));
         }
 
         // Footer hint
         let hint = "↑↓ nav  enter confirm  esc cancel";
-        let hint_y = y + h - 2;
-        let hint_x = x + w.saturating_sub(hint.len() as u16 + 2) / 2;
-        self.write_str(screen, hint_x, hint_y, hint, Some(DIM), Some(BG));
+        let hint_y = h - 2;
+        let hint_x = w.saturating_sub(hint.len() + 2) / 2;
+        canvas.put_str(hint_x, hint_y, hint, Some(DIM), Some(BG));
     }
 
-    fn draw_border(&self, screen: &mut Vec<Vec<Cell>>, x: u16, y: u16, w: u16, h: u16) {
-        self.set_cell(screen, x, y, '┌', Some(BORDER), Some(BG));
-        self.set_cell(screen, x + w - 1, y, '┐', Some(BORDER), Some(BG));
-        self.set_cell(screen, x, y + h - 1, '└', Some(BORDER), Some(BG));
-        self.set_cell(screen, x + w - 1, y + h - 1, '┘', Some(BORDER), Some(BG));
-        for dx in 1..w - 1 {
-            self.set_cell(screen, x + dx, y, '─', Some(BORDER), Some(BG));
-            self.set_cell(screen, x + dx, y + h - 1, '─', Some(BORDER), Some(BG));
+    fn draw_border(canvas: &mut Canvas, w: usize, h: usize) {
+        let (right, bottom) = (w - 1, h - 1);
+        canvas.set(0, 0, '┌', Some(BORDER), Some(BG));
+        canvas.set(right, 0, '┐', Some(BORDER), Some(BG));
+        canvas.set(0, bottom, '└', Some(BORDER), Some(BG));
+        canvas.set(right, bottom, '┘', Some(BORDER), Some(BG));
+        for x in 1..right {
+            canvas.set(x, 0, '─', Some(BORDER), Some(BG));
+            canvas.set(x, bottom, '─', Some(BORDER), Some(BG));
         }
-        for dy in 1..h - 1 {
-            self.set_cell(screen, x, y + dy, '│', Some(BORDER), Some(BG));
-            self.set_cell(screen, x + w - 1, y + dy, '│', Some(BORDER), Some(BG));
-        }
-    }
-
-    fn write_str(&self, screen: &mut Vec<Vec<Cell>>, x: u16, y: u16, text: &str, fg: Option<Color>, bg: Option<Color>) {
-        for (i, ch) in text.chars().enumerate() {
-            self.set_cell(screen, x + i as u16, y, ch, fg, bg);
-        }
-    }
-
-    fn set_cell(&self, screen: &mut Vec<Vec<Cell>>, x: u16, y: u16, ch: char, fg: Option<Color>, bg: Option<Color>) {
-        let (sx, sy) = (x as usize, y as usize);
-        if sy < screen.len() && sx < screen[0].len() {
-            screen[sy][sx] = Cell { ch, fg, bg };
+        for y in 1..bottom {
+            canvas.set(0, y, '│', Some(BORDER), Some(BG));
+            canvas.set(right, y, '│', Some(BORDER), Some(BG));
         }
     }
 }

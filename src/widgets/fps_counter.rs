@@ -1,4 +1,5 @@
-use crate::widget::{AbsRect, Widget, Cell};
+use crate::canvas::Canvas;
+use crate::widget::Widget;
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::style::Color;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,23 +34,17 @@ impl Widget for FpsCounter {
         // Updates come through handle_state_change
     }
 
-    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+    fn render(&self, canvas: &mut Canvas) -> std::io::Result<()> {
         use unicode_width::UnicodeWidthStr;
-        
+
         // Center vertically
-        let y = area.y as usize + (area.height as usize / 2);
-        
+        let y = canvas.height() / 2;
+
         // Center horizontally based on text width
         let text_width = UnicodeWidthStr::width(self.cached_text.as_str());
-        let x = area.x as usize + (area.width as usize).saturating_sub(text_width) / 2;
+        let x = canvas.width().saturating_sub(text_width) / 2;
 
-        for (i, ch) in self.cached_text.chars().enumerate() {
-            if y < buf.len() && x + i < buf[0].len() {
-                buf[y][x + i].ch = ch;
-                buf[y][x + i].fg = Some(Color::Green);
-            }
-        }
-
+        canvas.put_str(x, y, &self.cached_text, Some(Color::Green), None);
         Ok(())
     }
 

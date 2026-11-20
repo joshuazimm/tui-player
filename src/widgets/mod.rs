@@ -18,7 +18,8 @@ pub mod progress_bar;
 pub mod fps_counter;
 pub mod spectrum;
 
-use crate::widget::{AbsRect, Widget, Cell};
+use crate::canvas::Canvas;
+use crate::widget::{AbsRect, Widget};
 use enum_dispatch::enum_dispatch;
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::event::MouseEventKind;

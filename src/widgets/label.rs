@@ -1,5 +1,6 @@
 use crossterm::style::Color;
-use crate::widget::{AbsRect, Widget, Cell};
+use crate::canvas::Canvas;
+use crate::widget::Widget;
 use crate::state::{GlobalState, StateKey, StateValue};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -55,15 +56,14 @@ impl Widget for Label {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
-        let abs_width = area.width.saturating_add(1);
-        let abs_height = area.height.saturating_add(1);
+    fn render(&self, canvas: &mut Canvas) -> std::io::Result<()> {
+        let width = canvas.width();
 
         // Truncate + ellipsis if text doesn't fit
         let mut display_text = self.text.clone();
-        if display_text.len() > abs_width as usize {
-            if abs_width > 1 {
-                display_text.truncate(abs_width as usize - 1);
+        if display_text.len() > width {
+            if width > 1 {
+                display_text.truncate(width - 1);
                 display_text.push('…');
             } else {
                 display_text = "…".to_string();
@@ -72,31 +72,21 @@ impl Widget for Label {
 
         // Horizontal positioning
         let x_start = if self.align_center {
-            area.x as usize + (abs_width as usize).saturating_sub(display_text.len()) / 2
+            width.saturating_sub(display_text.len()) / 2
         } else {
-            area.x as usize
+            0
         };
-        
+
         // Vertical positioning (always center)
-        let y = area.y as usize + abs_height as usize / 2;
+        let y = canvas.height() / 2;
 
         // Render text
         if self.rainbow {
             for (i, ch) in display_text.chars().enumerate() {
-                let x = x_start + i;
-                if y < buf.len() && x < buf[0].len() {
-                    buf[y][x].ch = ch;
-                    buf[y][x].fg = Some(rainbow_color(i + self.tick));
-                }
+                canvas.set(x_start + i, y, ch, Some(rainbow_color(i + self.tick)), None);
             }
         } else {
-            for (i, ch) in display_text.chars().enumerate() {
-                let x = x_start + i;
-                if y < buf.len() && x < buf[0].len() {
-                    buf[y][x].ch = ch;
-                    buf[y][x].fg = Some(Color::White);
-                }
-            }
+            canvas.put_str(x_start, y, &display_text, Some(Color::White), None);
         }
 
         Ok(())

@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 // internal includes
 mod resampler;
 use resampler::{ResamplerKind, SimpleResampler};
+mod canvas;
 mod widget;
-use widget::{Layout, Rect, Section};
+use widget::{Layout, LayoutNode};
 mod widgets;
 use widgets::{AlbumArt, Controls, FileList, Label, ProgressBar, Spectrum, WidgetKind};
 mod keyhandler;
@@ -218,7 +219,7 @@ fn interleave_and_push(buffers: &[Vec<f32>], frames: usize, prod: &mut HeapProd<
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / 60); // 60 FPS
+    const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / 120); // 60 FPS
 
     let mut out = stdout();
     terminal::enable_raw_mode()?;
@@ -251,8 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut analysis_prod, analysis_cons) = analysis_rb.split();
 
     // Create widgets with simplified constructors
-    let file_list_rect = Rect { x: 0.0, y: 0.0, width: 0.3, height: 0.5 };
-    let file_list = FileList::new(PathBuf::from("C:/Users/Joshua Zimmerman/Media/Music"), file_list_rect, state.clone());
+    let file_list = FileList::new(PathBuf::from("C:/Users/joshu/Code/Rust/tui-player/test-tracks"), state.clone());
     //let controls = Controls::new();
     let progress_bar = ProgressBar::new();
     let album_art = AlbumArt::new(false);
@@ -261,59 +261,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let track_title_label = Label::new("No Track".to_string(), true, false)
         .with_subscription(vec![StateKey::CurrentTrackTitle]);
 
-    // Create layout with updated sections
-    let sections = vec![
-        Section::new(file_list_rect, WidgetKind::FileList(file_list)),
-        Section::new(
-            Rect {
-                x: 0.0,
-                y: 0.5,
-                width: 0.3,
-                height: 0.2,
-            },
-            WidgetKind::Label(track_title_label),
-        ),
-        Section::new(
-            Rect {
-                x: 0.0,
-                y: 0.7,
-                width: 0.3,
-                height: 0.2,
-            },
-            WidgetKind::FpsCounter(fps_counter::FpsCounter::new()),
-        ),
-        Section::new(
-            Rect {
-                x: 0.0,
-                y: 0.9,
-                width: 1.0,
-                height: 0.1,
-            },
-            WidgetKind::ProgressBar(progress_bar),
-        ),
-        // Album art takes the upper portion of the right panel
-        Section::new(
-            Rect {
-                x: 0.3,
-                y: 0.0,
-                width: 0.7,
-                height: 0.55,
-            },
-            WidgetKind::AlbumArt(album_art),
-        ),
-        // Spectrum visualiser occupies the lower portion of the right panel
-        Section::new(
-            Rect {
-                x: 0.3,
-                y: 0.55,
-                width: 0.7,
-                height: 0.35,
-            },
-            WidgetKind::Spectrum(spectrum),
-        ),
-    ];
+    // Layout tree: weights are relative to siblings
+    let root = LayoutNode::column(vec![
+        (0.9, LayoutNode::row(vec![
+            // Left panel: file list, track title, FPS counter
+            (0.3, LayoutNode::column(vec![
+                (0.5, LayoutNode::Widget(WidgetKind::FileList(file_list))),
+                (0.2, LayoutNode::Widget(WidgetKind::Label(track_title_label))),
+                (0.2, LayoutNode::Widget(WidgetKind::FpsCounter(fps_counter::FpsCounter::new()))),
+            ])),
+            // Right panel: album art above the spectrum visualiser
+            (0.7, LayoutNode::column(vec![
+                (0.55, LayoutNode::Widget(WidgetKind::AlbumArt(album_art))),
+                (0.35, LayoutNode::Widget(WidgetKind::Spectrum(spectrum))),
+            ])),
+        ])),
+        (0.1, LayoutNode::Widget(WidgetKind::ProgressBar(progress_bar))),
+    ]);
 
-    let mut layout = Layout::new(sections, state.clone());
+    let mut layout = Layout::new(root, state.clone());
     
     // Initialize all widgets with state (this sets up subscriptions)
     layout.init_all(&state);

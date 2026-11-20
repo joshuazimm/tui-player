@@ -1,4 +1,5 @@
-use crate::widget::{AbsRect, Widget, Cell};
+use crate::canvas::Canvas;
+use crate::widget::Widget;
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::style::Color;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,54 +48,38 @@ impl Widget for ProgressBar {
         }
     }
 
-    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+    fn render(&self, canvas: &mut Canvas) -> std::io::Result<()> {
         const PADDING: usize = 2;
-        
-        if area.width.saturating_add(1) <= (PADDING * 2) as u16 {
+
+        if canvas.width() <= PADDING * 2 {
             return Ok(());
         }
 
         let left_time = Self::format_time(self.progress);
         let right_time = Self::format_time(self.total);
 
-        let width = (area.width as usize)
+        let width = canvas.width()
             .saturating_sub(PADDING * 4)
             .saturating_sub(left_time.len())
-            .saturating_sub(right_time.len())
-            .saturating_add(1)
-            .max(0);
+            .saturating_sub(right_time.len());
 
         let frac = if self.total > 0.0 { self.progress / self.total } else { 0.0 };
         let filled_len = (frac * width as f64).round() as usize;
-        let bar_y = area.y as usize + (area.height.saturating_add(1) as usize / 2);
+        let bar_y = canvas.height() / 2;
 
         // Draw left time
-        for (i, ch) in left_time.chars().enumerate() {
-            let buf_x = area.x as usize + PADDING + i;
-            if bar_y < buf.len() && buf_x < buf[bar_y].len() {
-                buf[bar_y][buf_x].ch = ch;
-                buf[bar_y][buf_x].fg = Some(Color::White);
-            }
-        }
+        canvas.put_str(PADDING, bar_y, &left_time, Some(Color::White), None);
 
         // Draw progress bar
+        let bar_x = PADDING * 2 + left_time.len();
         for i in 0..width {
-            let buf_x = area.x as usize + PADDING * 2 + left_time.len() + i;
-            if bar_y < buf.len() && buf_x < buf[bar_y].len() {
-                let ch = if i < filled_len { '█' } else { '░' };
-                buf[bar_y][buf_x].ch = ch;
-                buf[bar_y][buf_x].fg = Some(Color::White);
-            }
+            let ch = if i < filled_len { '█' } else { '░' };
+            canvas.set(bar_x + i, bar_y, ch, Some(Color::White), None);
         }
 
         // Draw right time
-        for (i, ch) in right_time.chars().enumerate() {
-            let buf_x = area.x as usize + PADDING * 3 + left_time.len() + width + i;
-            if bar_y < buf.len() && buf_x < buf[bar_y].len() {
-                buf[bar_y][buf_x].ch = ch;
-                buf[bar_y][buf_x].fg = Some(Color::White);
-            }
-        }
+        let right_x = PADDING * 3 + left_time.len() + width;
+        canvas.put_str(right_x, bar_y, &right_time, Some(Color::White), None);
 
         Ok(())
     }

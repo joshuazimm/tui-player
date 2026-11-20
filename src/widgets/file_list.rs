@@ -1,4 +1,5 @@
-use crate::widget::{AbsRect, Rect, Widget, Cell};
+use crate::canvas::Canvas;
+use crate::widget::{AbsRect, Widget};
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::event::{MouseButton, MouseEventKind};
 use crossterm::style::Color;
@@ -62,7 +63,7 @@ pub struct FileList {
     needs_render: AtomicBool,
     state: GlobalState,
     modal_active: bool,
-    rect: Rect,
+    // Content area on screen, from Layout via on_resize (for modal spawn coords)
     abs_x: u16,
     abs_y: u16,
     abs_w: u16,
@@ -188,7 +189,7 @@ fn get_entry_by_flat_index_mut<'a>(entries: &'a mut [FileSystemEntry], flat_inde
 }
 
 impl FileList {
-    pub fn new(path: PathBuf, rect: Rect, state: GlobalState) -> Self {
+    pub fn new(path: PathBuf, state: GlobalState) -> Self {
         let entries = scan_directory(&path, 0);
         let mut flat_view = Vec::new();
         let mut base_index = 0;
@@ -205,7 +206,6 @@ impl FileList {
             needs_render: AtomicBool::new(true),
             state,
             modal_active: false,
-            rect,
             abs_x: 0,
             abs_y: 0,
             abs_w: 0,
@@ -359,18 +359,14 @@ impl FileList {
 }
 
 impl Widget for FileList {
+    fn on_resize(&mut self, area: &AbsRect) {
+        self.abs_x = area.x;
+        self.abs_y = area.y;
+        self.abs_w = area.width;
+    }
+
     fn update(&mut self, state: &GlobalState) {
         self.tick = self.tick.wrapping_add(1);
-
-        // Keep abs position in sync so keyboard events can compute spawn coords
-        if let Some(sv) = state.get(&StateKey::TerminalSize) {
-            if let Some((tw, th)) = sv.as_terminal_size() {
-                let (ax, ay, aw, _) = self.rect.to_absolute(tw, th);
-                self.abs_x = ax.saturating_add(1);
-                self.abs_y = ay.saturating_add(1);
-                self.abs_w = aw.saturating_sub(2);
-            }
-        }
 
         // Update selected index from state
         let current_index = state.selected_file_index();
@@ -380,25 +376,16 @@ impl Widget for FileList {
         }
     }
 
-    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+    fn render(&self, canvas: &mut Canvas) -> std::io::Result<()> {
+        let padding = PADDING as usize;
+
         // Calculate visible lines from the actual render area
-        let visible_lines = (area.height.saturating_sub(PADDING * 2)) as usize;
+        let visible_lines = canvas.height().saturating_sub(padding * 2);
         let total_items = self.flat_view.len();
 
         if total_items == 0 {
             let message = "No audio files found";
-            let x_start = area.x as usize + PADDING as usize;
-            let y = area.y as usize + PADDING as usize;
-            
-            if y < buf.len() {
-                for (i, ch) in message.chars().enumerate() {
-                    let x = x_start + i;
-                    if x < buf[0].len() {
-                        buf[y][x].ch = ch;
-                        buf[y][x].fg = Some(Color::DarkGrey);
-                    }
-                }
-            }
+            canvas.put_str(padding, padding, message, Some(Color::DarkGrey), None);
             return Ok(());
         }
 
@@ -432,7 +419,7 @@ impl Widget for FileList {
         self.scroll_offset.store(scroll_offset, Ordering::Relaxed);
 
         let end_index = (scroll_offset + visible_lines).min(total_items);
-        let max_width = area.width.saturating_sub(PADDING * 2);
+        let max_width = canvas.width().saturating_sub(padding * 2);
 
         // Render visible items
         for i in scroll_offset..end_index {
@@ -446,14 +433,14 @@ impl Widget for FileList {
                 let display_line = format!("{}{}", prefix, name);
 
                 let x_start = if self.align_center {
-                    area.x as usize + ((area.width as usize).saturating_sub(display_line.len()) / 2)
+                    canvas.width().saturating_sub(display_line.len()) / 2
                 } else {
-                    area.x as usize + PADDING as usize
+                    padding
                 };
-                let y = area.y as usize + PADDING as usize + display_index;
+                let y = padding + display_index;
 
-                let truncated_line: String = if display_line.len() as u16 > max_width && max_width > 0 {
-                    let mut truncated: String = display_line.chars().take(max_width.saturating_sub(1) as usize).collect();
+                let truncated_line: String = if display_line.len() > max_width && max_width > 0 {
+                    let mut truncated: String = display_line.chars().take(max_width.saturating_sub(1)).collect();
                     truncated.push('…');
                     truncated
                 } else {
@@ -469,53 +456,32 @@ impl Widget for FileList {
                     (Color::White, None)
                 };
 
-                if y < buf.len() {
-                    if self.rainbow {
-                        for (j, ch) in truncated_line.chars().enumerate() {
-                            let x = x_start + j;
-                            if x < buf[0].len() {
-                                let fg = if is_selected {
-                                    Color::Black
-                                } else {
-                                    rainbow_color(j + self.tick)
-                                };
-                                buf[y][x].ch = ch;
-                                buf[y][x].fg = Some(fg);
-                                buf[y][x].bg = default_bg;
-                            }
-                        }
-                    } else {
-                        for (j, ch) in truncated_line.chars().enumerate() {
-                            let x = x_start + j;
-                            if x < buf[0].len() {
-                                buf[y][x].ch = ch;
-                                buf[y][x].fg = Some(default_fg);
-                                buf[y][x].bg = default_bg;
-                            }
-                        }
+                if self.rainbow {
+                    for (j, ch) in truncated_line.chars().enumerate() {
+                        let fg = if is_selected {
+                            Color::Black
+                        } else {
+                            rainbow_color(j + self.tick)
+                        };
+                        canvas.set(x_start + j, y, ch, Some(fg), default_bg);
                     }
+                } else {
+                    canvas.put_str(x_start, y, &truncated_line, Some(default_fg), default_bg);
                 }
             }
         }
 
         // Show scroll indicators
         if total_items > visible_lines {
-            let scroll_x = (area.x + area.width).saturating_sub(1) as usize;
-            
+            let scroll_x = canvas.width().saturating_sub(1);
+
             if scroll_offset > 0 {
-                let scroll_y = area.y as usize + PADDING as usize;
-                if scroll_y < buf.len() && scroll_x < buf[0].len() {
-                    buf[scroll_y][scroll_x].ch = '↑';
-                    buf[scroll_y][scroll_x].fg = Some(Color::Yellow);
-                }
+                canvas.set(scroll_x, padding, '↑', Some(Color::Yellow), None);
             }
-            
+
             if scroll_offset + visible_lines < total_items {
-                let bottom_y = (area.y + area.height).saturating_sub(PADDING) as usize;
-                if bottom_y < buf.len() && scroll_x < buf[0].len() {
-                    buf[bottom_y][scroll_x].ch = '↓';
-                    buf[bottom_y][scroll_x].fg = Some(Color::Yellow);
-                }
+                let bottom_y = canvas.height().saturating_sub(padding);
+                canvas.set(scroll_x, bottom_y, '↓', Some(Color::Yellow), None);
             }
         }
 

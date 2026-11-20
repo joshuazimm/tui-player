@@ -1,5 +1,6 @@
 use image::{ImageBuffer, Rgba};
-use crate::widget::{AbsRect, Widget, Cell};
+use crate::canvas::Canvas;
+use crate::widget::Widget;
 use crate::state::{GlobalState, StateKey, StateValue};
 use crossterm::style::Color;
 use fast_image_resize as fir;
@@ -16,10 +17,10 @@ use zune_jpeg::JpegDecoder;
 /// What the background thread delivers: decoded image + (primary, secondary) colour.
 type LoadResult = (image::RgbaImage, ((u8, u8, u8), (u8, u8, u8)));
 
-/// Resized pixel data cached for a specific terminal area.
+/// Resized pixel data cached for a specific canvas size.
 struct CachedResize {
-    /// The (x, y, w, h) area that produced this resize.
-    area: (u16, u16, u16, u16),
+    /// The (width, height) canvas that produced this resize.
+    size: (usize, usize),
     data: Vec<u8>,
     draw_w: u32,
     draw_h: u32,
@@ -86,10 +87,17 @@ impl AlbumArt {
         self.needs_render.store(true, Ordering::Relaxed);
     }
 
-    fn render_pixels(cache: &CachedResize, area: &AbsRect, buf: &mut [Vec<Cell>]) {
+    fn render_pixels(cache: &CachedResize, canvas: &mut Canvas) {
         let stride = (cache.draw_w * 4) as usize;
         for by in 0..(cache.draw_h / 2) {
-            for bx in 0..cache.draw_w {
+            // Each cell is two pixels: the top one as fg of '▀', the bottom one as bg
+            let row = canvas.row_mut((cache.offset_y / 2 + by) as usize);
+            let cells = row.iter_mut()
+                .skip(cache.offset_x as usize)
+                .take(cache.draw_w as usize);
+
+            for (bx, cell) in cells.enumerate() {
+                let bx = bx as u32;
                 let top_off = (by * 2 * stride as u32 + bx * 4) as usize;
                 let bot_off = ((by * 2 + 1) * stride as u32 + bx * 4) as usize;
                 if bot_off + 4 > cache.data.len() {
@@ -97,14 +105,9 @@ impl AlbumArt {
                 }
                 let tp = &cache.data[top_off..top_off + 4];
                 let bp = &cache.data[bot_off..bot_off + 4];
-                let x = area.x as usize + cache.offset_x as usize + bx as usize;
-                let y = area.y as usize + (cache.offset_y / 2) as usize + by as usize;
-                if y < buf.len() && x < buf[y].len() {
-                    let cell = &mut buf[y][x];
-                    cell.ch = '▀';
-                    cell.fg = Some(Color::Rgb { r: tp[0], g: tp[1], b: tp[2] });
-                    cell.bg = Some(Color::Rgb { r: bp[0], g: bp[1], b: bp[2] });
-                }
+                cell.ch = '▀';
+                cell.fg = Some(Color::Rgb { r: tp[0], g: tp[1], b: tp[2] });
+                cell.bg = Some(Color::Rgb { r: bp[0], g: bp[1], b: bp[2] });
             }
         }
     }
@@ -134,42 +137,36 @@ impl Widget for AlbumArt {
         }
     }
 
-    fn render(&self, area: &AbsRect, buf: &mut [Vec<Cell>]) -> std::io::Result<()> {
+    fn render(&self, canvas: &mut Canvas) -> std::io::Result<()> {
         let img = match &self.img {
             Some(img) => img,
             None => {
                 let placeholder = "♪ No Album Art ♪";
-                let y = area.y as usize + area.height as usize / 2;
-                let x_start = area.x as usize
-                    + (area.width as usize).saturating_sub(placeholder.len()) / 2;
-                for (i, ch) in placeholder.chars().enumerate() {
-                    if y < buf.len() && x_start + i < buf[y].len() {
-                        buf[y][x_start + i].ch = ch;
-                        buf[y][x_start + i].fg = Some(Color::DarkGrey);
-                    }
-                }
+                let y = canvas.height() / 2;
+                let x_start = canvas.width().saturating_sub(placeholder.len()) / 2;
+                canvas.put_str(x_start, y, placeholder, Some(Color::DarkGrey), None);
                 return Ok(());
             }
         };
 
-        let area_key = (area.x, area.y, area.width, area.height);
+        let canvas_size = (canvas.width(), canvas.height());
 
-        // Return cached resize if the area matches.
+        // Return cached resize if the canvas size matches.
         {
             let cache = self.cached_resize.borrow();
             if let Some(c) = cache.as_ref() {
-                if c.area == area_key {
-                    Self::render_pixels(c, area, buf);
+                if c.size == canvas_size {
+                    Self::render_pixels(c, canvas);
                     return Ok(());
                 }
             }
         }
 
-        // Compute a fresh resize for the new area dimensions.
+        // Compute a fresh resize for the new canvas dimensions.
         let orig_w = img.width();
         let orig_h = img.height();
-        let target_w = (area.width + 1) as u32;
-        let target_h = (area.height + 1) as u32 * 2;
+        let target_w = canvas.width() as u32;
+        let target_h = canvas.height() as u32 * 2;
 
         let img_aspect = orig_w as f32 / orig_h as f32;
         let target_aspect = target_w as f32 / target_h as f32;
@@ -211,7 +208,7 @@ impl Widget for AlbumArt {
         resizer.resize(&src.view(), &mut dst.view_mut()).unwrap();
 
         let cache = CachedResize {
-            area: area_key,
+            size: canvas_size,
             data: dst.buffer().to_vec(),
             draw_w,
             draw_h,
@@ -219,7 +216,7 @@ impl Widget for AlbumArt {
             offset_y,
         };
 
-        Self::render_pixels(&cache, area, buf);
+        Self::render_pixels(&cache, canvas);
         *self.cached_resize.borrow_mut() = Some(cache);
         Ok(())
     }
