@@ -122,13 +122,18 @@ pub struct GlobalState {
 }
 
 impl GlobalState {
+    /// Startup volume, and the value every reader falls back to if the key is
+    /// ever missing. Widgets that cache volume compare against this, so it has
+    /// to be the one definition.
+    pub const DEFAULT_VOLUME: f32 = 0.05;
+
     pub fn new() -> Self {
         let mut initial_state = HashMap::new();
         
         // Initialize with default values
         initial_state.insert(StateKey::IsPlaying, StateValue::Bool(false));
         initial_state.insert(StateKey::IsPaused, StateValue::Bool(false));
-        initial_state.insert(StateKey::Volume, StateValue::F32(0.05));
+        initial_state.insert(StateKey::Volume, StateValue::F32(Self::DEFAULT_VOLUME));
         initial_state.insert(StateKey::PlaybackPosition, StateValue::F64(0.0));
         initial_state.insert(StateKey::TrackDuration, StateValue::F64(0.0));
         initial_state.insert(StateKey::SelectedFileIndex, StateValue::U32(0));
@@ -283,7 +288,7 @@ impl GlobalState {
     }
 
     pub fn volume(&self) -> f32 {
-        self.get(&StateKey::Volume).and_then(|v| v.as_f32()).unwrap_or(0.05)
+        self.get(&StateKey::Volume).and_then(|v| v.as_f32()).unwrap_or(Self::DEFAULT_VOLUME)
     }
 
     pub fn current_track_path(&self) -> Option<PathBuf> {

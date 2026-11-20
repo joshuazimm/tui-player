@@ -8,45 +8,64 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct Controls {
     cached_text: String,
     needs_render: AtomicBool,
-    is_paused: bool,
+    is_playing: bool,
     volume: f32,
 }
 
 impl Controls {
     pub fn new() -> Self {
-        Self {
+        let mut controls = Self {
             cached_text: String::new(),
             needs_render: AtomicBool::new(true),
-            is_paused: false,
-            volume: 0.05,
-        }
+            is_playing: false,
+            volume: GlobalState::DEFAULT_VOLUME,
+        };
+        // The text has to be built here, not left to the first `update`: the
+        // fields above already match what a fresh `GlobalState` reports, so
+        // `update` sees no change and would never fill the text in, leaving the
+        // widget drawing an empty string until the first keypress.
+        controls.rebuild_text();
+        controls
     }
 
-    fn update_cached_text(&mut self) {
+    /// The transport line: the action the play/pause key would take, then volume.
+    ///
+    /// Both glyphs are deliberately single-width. `flush_buffer` writes one
+    /// cell per char and emits a run of changed cells after a single `MoveTo`,
+    /// so a glyph the terminal draws double-width (U+23F8 has emoji
+    /// presentation almost everywhere) would shift the rest of the line one
+    /// column right and leave a stale cell behind.
+    fn rebuild_text(&mut self) {
         let new_text = format!(
             "{}  |  Vol: {:.0}%",
-            if self.is_paused { "▶ Play" } else { "⏸ Pause" },
+            if self.is_playing { "\u{258c}\u{258c} Pause" } else { "\u{25ba} Play" },
             self.volume * 100.0
         );
-        
+
         if self.cached_text != new_text {
             self.cached_text = new_text;
             self.needs_render.store(true, Ordering::Relaxed);
         }
     }
+
+    /// Volume only shows as a whole percent, so a change is worth a redraw
+    /// exactly when that number moves. (A plain `> 0.01` epsilon was the same
+    /// size as the keyboard's volume step, so single presses registered or not
+    /// depending on float rounding.)
+    fn volume_changed(&self, volume: f32) -> bool {
+        (self.volume * 100.0).round() != (volume * 100.0).round()
+    }
 }
 
 impl Widget for Controls {
     fn update(&mut self, state: &GlobalState) {
-        // Get current state values
-        let current_paused = state.is_paused();
-        let current_volume = state.volume();
-        
-        // Update if changed
-        if self.is_paused != current_paused || (self.volume - current_volume).abs() > 0.01 {
-            self.is_paused = current_paused;
-            self.volume = current_volume;
-            self.update_cached_text();
+        let is_playing = state.is_playing();
+        let volume = state.volume();
+
+        if self.is_playing != is_playing || self.volume_changed(volume) {
+            self.is_playing = is_playing;
+            self.volume = volume;
+            self.rebuild_text();
         }
     }
 
@@ -71,19 +90,19 @@ impl Widget for Controls {
 
     fn handle_state_change(&mut self, key: &StateKey, value: &StateValue) {
         match key {
-            StateKey::IsPaused => {
-                if let Some(is_paused) = value.as_bool() {
-                    if self.is_paused != is_paused {
-                        self.is_paused = is_paused;
-                        self.update_cached_text();
+            StateKey::IsPlaying => {
+                if let Some(is_playing) = value.as_bool() {
+                    if self.is_playing != is_playing {
+                        self.is_playing = is_playing;
+                        self.rebuild_text();
                     }
                 }
             }
             StateKey::Volume => {
                 if let Some(volume) = value.as_f32() {
-                    if (self.volume - volume).abs() > 0.01 {
+                    if self.volume_changed(volume) {
                         self.volume = volume;
-                        self.update_cached_text();
+                        self.rebuild_text();
                     }
                 }
             }
@@ -92,6 +111,6 @@ impl Widget for Controls {
     }
 
     fn subscribed_keys(&self) -> Vec<StateKey> {
-        vec![StateKey::IsPaused, StateKey::Volume]
+        vec![StateKey::IsPlaying, StateKey::Volume]
     }
 }

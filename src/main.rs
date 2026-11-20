@@ -252,8 +252,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut analysis_prod, analysis_cons) = analysis_rb.split();
 
     // Create widgets with simplified constructors
-    let file_list = FileList::new(PathBuf::from("C:/Users/joshu/Code/Rust/tui-player/test-tracks"), state.clone());
-    //let controls = Controls::new();
+    let file_list = FileList::new(PathBuf::from("C:/Programming/Rust/foobar-rust/demo"), state.clone());
+    let controls = Controls::new();
     let progress_bar = ProgressBar::new();
     let album_art = AlbumArt::new(false);
     let band_centers = analysis::band_centers(DEFAULT_NUM_BANDS, device_rate as f32);
@@ -261,22 +261,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let track_title_label = Label::new("No Track".to_string(), true, false)
         .with_subscription(vec![StateKey::CurrentTrackTitle]);
 
-    // Layout tree: weights are relative to siblings
     let root = LayoutNode::column(vec![
-        (0.9, LayoutNode::row(vec![
-            // Left panel: file list, track title, FPS counter
-            (0.3, LayoutNode::column(vec![
-                (0.5, LayoutNode::Widget(WidgetKind::FileList(file_list))),
-                (0.2, LayoutNode::Widget(WidgetKind::Label(track_title_label))),
-                (0.2, LayoutNode::Widget(WidgetKind::FpsCounter(fps_counter::FpsCounter::new()))),
-            ])),
-            // Right panel: album art above the spectrum visualiser
-            (0.7, LayoutNode::column(vec![
-                (0.55, LayoutNode::Widget(WidgetKind::AlbumArt(album_art))),
-                (0.35, LayoutNode::Widget(WidgetKind::Spectrum(spectrum))),
+        // Title strip: one line, like a player's window caption
+        (0.09, LayoutNode::Widget(WidgetKind::Label(track_title_label))),
+        // Body: cover art on the left, playlist over the visualiser on the right
+        (0.73, LayoutNode::row(vec![
+            (0.34, LayoutNode::Widget(WidgetKind::AlbumArt(album_art))),
+            (0.66, LayoutNode::column(vec![
+                (0.68, LayoutNode::Widget(WidgetKind::FileList(file_list))),
+                (0.32, LayoutNode::Widget(WidgetKind::Spectrum(spectrum))),
             ])),
         ])),
-        (0.1, LayoutNode::Widget(WidgetKind::ProgressBar(progress_bar))),
+        // Seek bar: elapsed / remaining either side of the full-width bar
+        (0.09, LayoutNode::Widget(WidgetKind::ProgressBar(progress_bar))),
+        // Transport: play state and volume, with the FPS readout tucked right
+        (0.09, LayoutNode::row(vec![
+            (0.78, LayoutNode::Widget(WidgetKind::Controls(controls))),
+            (0.22, LayoutNode::Widget(WidgetKind::FpsCounter(fps_counter::FpsCounter::new()))),
+        ])),
     ]);
 
     let mut layout = Layout::new(root, state.clone());
